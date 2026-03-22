@@ -7,8 +7,12 @@ from helper.network import create_requests_session
 
 load_dotenv()
 
-REQUESTS_SESSION = create_requests_session()
+AI_USE_TOR_TUNNEL = os.getenv("AI_USE_TOR_TUNNEL", "false").strip().lower() == "true"
+REQUESTS_SESSION = create_requests_session(use_tor=AI_USE_TOR_TUNNEL)
 logger = logging.getLogger(__name__)
+
+if not AI_USE_TOR_TUNNEL:
+    logger.info("AI provider requests will bypass Tor tunnel")
 
 DEFAULT_SCITELY_BASE_URL = "https://api.scitely.com/v1"
 DEFAULT_SCITELY_MODEL = "deepseek-v3.2"

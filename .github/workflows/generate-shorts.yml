@@ -41,6 +41,7 @@ jobs:
       ENABLE_YOUTUBE_UPLOAD: ${{ inputs.upload_to_youtube }}
       ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
       TOR_PROXY_URL: socks5h://127.0.0.1:9050
+      AI_USE_TOR_TUNNEL: "false"
 
       AI_PROVIDER: nvidia
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}

@@ -28,9 +28,14 @@ def get_tor_proxy_url():
     return f"socks5h://{host}:{port}"
 
 
-def create_requests_session():
+def create_requests_session(use_tor=None):
     session = requests.Session()
-    proxy_url = get_tor_proxy_url()
+
+    if use_tor is False:
+        session.trust_env = False
+        return session
+
+    proxy_url = get_tor_proxy_url() if use_tor is not False else None
 
     if proxy_url:
         session.trust_env = False
