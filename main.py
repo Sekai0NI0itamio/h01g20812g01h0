@@ -327,18 +327,21 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         # Optional: YouTube Upload
         if should_auto_upload(auto_upload):
             logger.info("Uploading to YouTube")
-            from automation.youtube_upload import upload_video, get_authenticated_service
+            try:
+                from automation.youtube_upload import upload_video, get_authenticated_service
 
-            youtube = get_authenticated_service()
+                youtube = get_authenticated_service()
 
-            upload_video(
-                youtube,
-                video_path,
-                title,
-                description,  # Use the generated description
-                ["shorts", "ai", "technology"],  # Still include default tags
-                thumbnail_path=thumbnail_path
-            )
+                upload_video(
+                    youtube,
+                    video_path,
+                    title,
+                    description,  # Use the generated description
+                    ["shorts", "ai", "technology"],  # Still include default tags
+                    thumbnail_path=thumbnail_path
+                )
+            except Exception as upload_error:
+                logger.error(f"YouTube upload failed, continuing with artifact output only: {upload_error}")
 
         return video_path, thumbnail_path
 
