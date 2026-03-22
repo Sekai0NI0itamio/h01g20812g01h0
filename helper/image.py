@@ -24,11 +24,35 @@ def get_pixabay_api_key():
 
 
 def get_unsplash_api_key():
-    return (
+    raw_value = (
         os.getenv("UNSPLASH_API_KEY")
         or os.getenv("UNSPLASH_ACCESS_KEY")
         or os.getenv("UNSPLASH_ACCESS_ID")
     )
+    return _extract_unsplash_access_key(raw_value)
+
+
+def _extract_unsplash_access_key(raw_value):
+    """Extract Unsplash Access ID from either plain key or combined multi-line credential text."""
+    if not raw_value:
+        return None
+
+    text = str(raw_value).strip()
+    if not text:
+        return None
+
+    # If key material is stored as one blob, prefer the explicit Access ID field.
+    match = re.search(r"(?im)^\s*access\s*(?:id|key)\s*:\s*([^\s]+)\s*$", text)
+    if match:
+        return match.group(1).strip()
+
+    # Accept Application ID / Secret ID labels but keep only the first token if unlabeled.
+    first_line = text.splitlines()[0].strip()
+    if ":" in first_line and not re.search(r"(?i)access\s*(?:id|key)", first_line):
+        return None
+
+    # Plain single-token access key path.
+    return first_line.split()[0]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
