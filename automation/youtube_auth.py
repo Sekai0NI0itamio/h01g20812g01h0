@@ -1,5 +1,7 @@
 import os
+import json
 import pickle
+import sys
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -33,14 +35,52 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly"
 ]
 
+
+def _load_token_credentials(token_path):
+    if not os.path.exists(token_path):
+        return None
+
+    lower = token_path.lower()
+    if lower.endswith(".json"):
+        return Credentials.from_authorized_user_file(token_path, SCOPES)
+
+    # Try pickle first for backward compatibility.
+    try:
+        with open(token_path, "rb") as token_file:
+            return pickle.load(token_file)
+    except Exception:
+        pass
+
+    # Fallback: token path may be .pickle but content could be JSON.
+    try:
+        with open(token_path, "r", encoding="utf-8") as token_file:
+            payload = json.load(token_file)
+        return Credentials.from_authorized_user_info(payload, SCOPES)
+    except Exception:
+        return None
+
+
+def _save_token_credentials(credentials, token_path):
+    lower = token_path.lower()
+    if lower.endswith(".json"):
+        with open(token_path, "w", encoding="utf-8") as token_file:
+            token_file.write(credentials.to_json())
+        return
+
+    with open(token_path, "wb") as token_file:
+        pickle.dump(credentials, token_file)
+
+
+def _is_non_interactive_environment():
+    return os.getenv("GITHUB_ACTIONS", "false").lower() == "true" or not sys.stdin.isatty()
+
 def authenticate_youtube():
     credentials = None
 
     # Load existing credentials if available
     if os.path.exists(TOKEN_FILE):
         try:
-            with open(TOKEN_FILE, "rb") as token:
-                credentials = pickle.load(token)
+            credentials = _load_token_credentials(TOKEN_FILE)
             print("📂 Loaded credentials from credentials directory")
         except Exception as e:
             print(f"⚠️ Error loading token file: {e}")
@@ -58,6 +98,12 @@ def authenticate_youtube():
                 if not os.path.exists(CLIENT_SECRETS_FILE):
                     raise FileNotFoundError(f"Client secrets file not found at: {CLIENT_SECRETS_FILE}")
 
+                if _is_non_interactive_environment():
+                    raise RuntimeError(
+                        "Interactive OAuth is not available in this environment. "
+                        "Provide a valid YouTube token secret (JSON token content)."
+                    )
+
                 # Prompt user for re-authentication if no valid refresh token
                 print("🔑 Token expired or invalid. Re-authenticating...")
                 flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
@@ -65,6 +111,8 @@ def authenticate_youtube():
         except Exception as e:
             print(f"❌ Error during token refresh or authentication: {e}")
             if os.path.exists(CLIENT_SECRETS_FILE):
+                if _is_non_interactive_environment():
+                    raise
                 print("⚠️ Re-authenticating...")
                 flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
                 credentials = flow.run_local_server(port=8080)
@@ -73,9 +121,8 @@ def authenticate_youtube():
 
         # Save the new or refreshed credentials
         try:
-            with open(TOKEN_FILE, "wb") as token:
-                pickle.dump(credentials, token)
-                print("💾 Token saved successfully in credentials directory!")
+            _save_token_credentials(credentials, TOKEN_FILE)
+            print("💾 Token saved successfully in credentials directory!")
         except Exception as e:
             print(f"⚠️ Error saving token file: {e}")
 

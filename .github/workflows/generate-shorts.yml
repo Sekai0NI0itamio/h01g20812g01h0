@@ -74,6 +74,7 @@ jobs:
         if: ${{ inputs.upload_to_youtube }}
         env:
           YOUTUBE_CLIENT_SECRET_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           YOUTUBE_TOKEN_PICKLE_B64: ${{ secrets.YOUTUBE_TOKEN_PICKLE_B64 }}
         run: |
           set -e
@@ -84,9 +85,16 @@ jobs:
             echo "YOUTUBE_CLIENT_SECRET_PATH=$GITHUB_WORKSPACE/automation/credentials/client_secret.json" >> "$GITHUB_ENV"
           fi
 
-          if [ -n "$YOUTUBE_TOKEN_PICKLE_B64" ]; then
-            printf '%s' "$YOUTUBE_TOKEN_PICKLE_B64" | base64 --decode > automation/credentials/token.pickle
-            echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.pickle" >> "$GITHUB_ENV"
+          if [ -n "$YOUTUBE_TOKEN_JSON" ]; then
+            printf '%s' "$YOUTUBE_TOKEN_JSON" > automation/credentials/token.json
+            echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.json" >> "$GITHUB_ENV"
+          elif [ -n "$YOUTUBE_TOKEN_PICKLE_B64" ]; then
+            if printf '%s' "$YOUTUBE_TOKEN_PICKLE_B64" | base64 --decode > automation/credentials/token.pickle 2>/dev/null; then
+              echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.pickle" >> "$GITHUB_ENV"
+            else
+              printf '%s' "$YOUTUBE_TOKEN_PICKLE_B64" > automation/credentials/token.json
+              echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.json" >> "$GITHUB_ENV"
+            fi
           fi
 
       - name: Generate shorts sequentially
