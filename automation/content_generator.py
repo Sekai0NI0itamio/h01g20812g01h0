@@ -7,6 +7,8 @@ from pathlib import Path
 from automation.scitely_client import (
     ScitelyAPIError,
     create_chat_completion,
+    disable_scitely,
+    is_scitely_disabled,
     get_scitely_api_key,
     get_scitely_model,
 )
@@ -93,6 +95,7 @@ def _extract_completion_content(response):
 
 
 def _create_json_completion(prompt, model, max_tokens, temperature):
+    provider = "nvidia" if is_scitely_disabled() else "auto"
     try:
         response = create_chat_completion(
             messages=[{"role": "user", "content": prompt}],
@@ -100,8 +103,10 @@ def _create_json_completion(prompt, model, max_tokens, temperature):
             max_tokens=max_tokens,
             temperature=temperature,
             response_format={"type": "json_object"},
+            provider=provider,
         )
     except ScitelyAPIError as exc:
+        disable_scitely(exc)
         if "response_format" not in str(exc).lower():
             raise
 
@@ -114,6 +119,7 @@ def _create_json_completion(prompt, model, max_tokens, temperature):
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
+            provider="nvidia",
         )
 
     return _extract_completion_content(response)
@@ -251,6 +257,7 @@ def generate_batch_video_queries(texts: list[str], overall_topic="technology", m
 
         except ScitelyAPIError as e:
             logger.error(f"Scitely API error generating batch video queries (attempt {attempt + 1}/{retries}): {str(e)}")
+            disable_scitely(e)
 
         # If loop continues, it means an error occurred
         if attempt < retries - 1:
@@ -339,6 +346,7 @@ def generate_batch_image_prompts(texts: list[str], overall_topic="technology", m
 
         except ScitelyAPIError as e:
             logger.error(f"Scitely API error generating batch image prompts (attempt {attempt + 1}/{retries}): {str(e)}")
+            disable_scitely(e)
 
         # If loop continues, it means an error occurred
         if attempt < retries - 1:
@@ -368,6 +376,8 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
         return []
 
     model = model or get_scitely_model()
+    if is_scitely_disabled():
+        logger.info("Scitely is disabled; sound effect planning will use NVIDIA")
 
     formatted_lines = "\n".join(
         [f"{idx}: {line}" for idx, line in enumerate(script_lines)]
@@ -488,6 +498,8 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
                 retries,
                 e,
             )
+            if isinstance(e, ScitelyAPIError):
+                disable_scitely(e)
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
 
@@ -558,6 +570,8 @@ def generate_meme_insertion_plan(
         return []
 
     model = model or get_scitely_model()
+    if is_scitely_disabled():
+        logger.info("Scitely is disabled; meme insertion planning will use NVIDIA")
 
     max_effective = max(1, min(int(max_insertions), 11, len(script_lines)))
     min_effective = max(1, min(int(min_insertions), max_effective))
@@ -665,6 +679,8 @@ def generate_meme_insertion_plan(
                 retries,
                 e,
             )
+            if isinstance(e, ScitelyAPIError):
+                disable_scitely(e)
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
 
@@ -692,6 +708,8 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3)
         raise ValueError("Scitely API key is not set. Please set SCITELY_API_KEY in .env.")
 
     model = model or get_scitely_model()
+    if is_scitely_disabled():
+        logger.info("Scitely is disabled; comprehensive content generation will use NVIDIA")
 
     # Current date for relevance
     from datetime import datetime
@@ -796,6 +814,7 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3)
 
         except ScitelyAPIError as e:
             logger.error(f"Scitely API error (attempt {attempt + 1}/{retries}): {str(e)}")
+            disable_scitely(e)
             if attempt == retries - 1:
                 break
 

@@ -46,6 +46,19 @@ def get_nvidia_model(default=None):
     return os.getenv("NVIDIA_MODEL", default or DEFAULT_NVIDIA_MODEL)
 
 
+def is_scitely_disabled():
+    return _SCITELY_DISABLED
+
+
+def disable_scitely(reason=None):
+    global _SCITELY_DISABLED
+    _SCITELY_DISABLED = True
+    if reason:
+        logger.warning("Scitely disabled for the remainder of this run: %s", reason)
+    else:
+        logger.warning("Scitely disabled for the remainder of this run")
+
+
 def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temperature, response_format, stream, timeout):
     payload = {
         "model": model,
@@ -94,6 +107,7 @@ def create_chat_completion(
     response_format=None,
     stream=False,
     timeout=90,
+    provider="auto",
 ):
     global _SCITELY_DISABLED
 
@@ -102,28 +116,13 @@ def create_chat_completion(
 
     scitely_error = None
 
-    if scitely_api_key and not _SCITELY_DISABLED:
-        try:
-            return _post_chat_completion(
-                base_url=get_scitely_base_url(),
-                api_key=scitely_api_key,
-                model=model or get_scitely_model(),
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                response_format=response_format,
-                stream=stream,
-                timeout=timeout,
-            )
-        except ScitelyAPIError as exc:
-            scitely_error = exc
-            _SCITELY_DISABLED = True
-            if nvidia_api_key:
-                logger.warning("Scitely chat completion failed; switching to NVIDIA for subsequent requests: %s", exc)
-            else:
-                logger.warning("Scitely chat completion failed and no NVIDIA key is configured: %s", exc)
+    provider = (provider or "auto").strip().lower()
+    if provider not in {"auto", "scitely", "nvidia"}:
+        raise ValueError(f"Unsupported provider: {provider}")
 
-    if nvidia_api_key:
+    def call_nvidia():
+        if not nvidia_api_key:
+            raise ValueError("NVIDIA_API_KEY is not set")
         return _post_chat_completion(
             base_url=get_nvidia_base_url(),
             api_key=nvidia_api_key,
@@ -135,6 +134,48 @@ def create_chat_completion(
             stream=stream,
             timeout=timeout,
         )
+
+    def call_scitely():
+        if not scitely_api_key:
+            raise ValueError("Scitely API key is not set")
+        return _post_chat_completion(
+            base_url=get_scitely_base_url(),
+            api_key=scitely_api_key,
+            model=model or get_scitely_model(),
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=response_format,
+            stream=stream,
+            timeout=timeout,
+        )
+
+    if provider == "nvidia":
+        return call_nvidia()
+
+    if provider == "scitely":
+        try:
+            return call_scitely()
+        except ScitelyAPIError as exc:
+            disable_scitely(exc)
+            if nvidia_api_key:
+                logger.warning("Scitely request failed; retrying immediately on NVIDIA")
+                return call_nvidia()
+            raise
+
+    if scitely_api_key and not _SCITELY_DISABLED:
+        try:
+            return call_scitely()
+        except ScitelyAPIError as exc:
+            scitely_error = exc
+            disable_scitely(exc)
+            if nvidia_api_key:
+                logger.warning("Scitely chat completion failed; switching to NVIDIA for subsequent requests: %s", exc)
+            else:
+                logger.warning("Scitely chat completion failed and no NVIDIA key is configured: %s", exc)
+
+    if nvidia_api_key:
+        return call_nvidia()
 
     if scitely_error:
         raise scitely_error
