@@ -9,7 +9,6 @@ DEFAULT_C05_BASE_URL = "http://127.0.0.1:8129"
 
 HOSTER_ENV_MAP = {
     "scitely": "SCITELY_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
     "pexels": "PEXELS_API_KEY",
     "unsplash": "UNSPLASH_API_KEY",
     "pixabay": "PIXABAY_API_KEY",
@@ -63,7 +62,6 @@ def configure_provider_keys_from_c05(hosters=None):
     configured = {}
     requested_hosters = hosters or (
         "scitely",
-        "openrouter",
         "pexels",
         "unsplash",
         "pixabay",

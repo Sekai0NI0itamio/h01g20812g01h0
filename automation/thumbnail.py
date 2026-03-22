@@ -14,6 +14,7 @@ import shutil
 # Custom helpers
 from helper.minor_helper import measure_time, cleanup_temp_directories
 from helper.shorts_assets import get_default_font_path
+from helper.image import fetch_image_from_duckduckgo, get_unsplash_api_key
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ class ThumbnailGenerator:
         self.title_font_path = get_default_font_path()
 
         # Unsplash API (for fallback)
-        self.unsplash_api_key = os.getenv("UNSPLASH_API_KEY")
+        self.unsplash_api_key = get_unsplash_api_key()
         self.unsplash_api_url = "https://api.unsplash.com/search/photos"
         self.pexels_api_key = os.getenv("PEXELS_API_KEY")
         self.pixabay_api_key = os.getenv("PIXABAY_API_KEY")
@@ -225,7 +226,8 @@ class ThumbnailGenerator:
         """Fetch background image from stock providers (Pexels/Pixabay/Unsplash)."""
         clean_query = (query or "technology news background").strip()
         return (
-            self.fetch_image_pexels(clean_query)
+            fetch_image_from_duckduckgo(clean_query)
+            or self.fetch_image_pexels(clean_query)
             or self.fetch_image_pixabay(clean_query)
             or self.fetch_image_unsplash(clean_query)
         )

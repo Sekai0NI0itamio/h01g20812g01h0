@@ -1,12 +1,10 @@
 import time
 import random
 import os
-import base64
 import requests
 import logging
 import concurrent.futures
 import re
-from urllib.parse import unquote
 from moviepy  import VideoClip, concatenate_videoclips, ColorClip, CompositeVideoClip, ImageClip, TextClip
 from helper.blur import custom_blur, custom_edge_blur
 from helper.minor_helper import measure_time
@@ -15,25 +13,6 @@ from dotenv import load_dotenv
 from typing import Optional, List, Tuple, Dict, Any, Union
 
 load_dotenv()
-
-# Other API keys
-def get_openrouter_api_key():
-    return os.getenv("OPENROUTER_API_KEY")
-
-
-def get_openrouter_image_model():
-    return os.getenv("OPENROUTER_IMAGE_MODEL", "sourceful/riverflow-v2-pro")
-
-
-def get_openrouter_image_api_url():
-    return os.getenv(
-        "OPENROUTER_IMAGE_API_URL",
-        "https://openrouter.ai/api/v1/chat/completions",
-    )
-
-
-def get_openrouter_image_size():
-    return os.getenv("OPENROUTER_IMAGE_SIZE", "1K")
 
 
 def get_pexels_api_key():
@@ -45,7 +24,11 @@ def get_pixabay_api_key():
 
 
 def get_unsplash_api_key():
-    return os.getenv("UNSPLASH_API_KEY")
+    return (
+        os.getenv("UNSPLASH_API_KEY")
+        or os.getenv("UNSPLASH_ACCESS_KEY")
+        or os.getenv("UNSPLASH_ACCESS_ID")
+    )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,47 +40,6 @@ TEMP_DIR = os.getenv("TEMP_DIR", os.path.join(os.path.dirname(os.path.dirname(__
 # Create images subdirectory
 temp_dir = os.path.join(TEMP_DIR, "generated_images")
 os.makedirs(temp_dir, exist_ok=True)  # Create temp directory if it doesn't exist
-
-def _decode_data_url_to_file(data_url, file_path):
-    if not data_url.startswith("data:"):
-        raise ValueError("Expected image data URL from OpenRouter response.")
-
-    header, encoded = data_url.split(",", 1)
-    mime_type = header.split(";")[0].split(":", 1)[1]
-    if ";base64" in header:
-        image_bytes = base64.b64decode(encoded)
-    else:
-        image_bytes = unquote(encoded).encode("utf-8")
-
-    file_extension = mime_type.split("/")[-1] or "png"
-    if not os.path.splitext(file_path)[1]:
-        file_path = f"{file_path}.{file_extension}"
-
-    with open(file_path, "wb") as image_file:
-        image_file.write(image_bytes)
-
-    return file_path
-
-
-def _openrouter_headers():
-    openrouter_api_key = get_openrouter_api_key()
-    if not openrouter_api_key:
-        return None
-
-    headers = {
-        "Authorization": f"Bearer {openrouter_api_key}",
-        "Content-Type": "application/json",
-    }
-
-    site_url = os.getenv("OPENROUTER_SITE_URL")
-    app_name = os.getenv("OPENROUTER_APP_NAME")
-    if site_url:
-        headers["HTTP-Referer"] = site_url
-    if app_name:
-        headers["X-Title"] = app_name
-
-    return headers
-
 
 @measure_time
 def fetch_image_from_duckduckgo(query, file_path=None):
@@ -197,7 +139,11 @@ def generate_images_parallel(prompts, style="photorealistic", max_workers=None):
 
     def generate_single_image(prompt):
         try:
-            # OpenRouter image generation is intentionally disabled.
+            logger.info(f"Trying DuckDuckGo for: {prompt[:30]}...")
+            image_path = fetch_image_from_duckduckgo(prompt)
+            if image_path:
+                return image_path
+
             logger.info(f"Trying Unsplash for: {prompt[:30]}...")
             image_path = _fetch_image_from_unsplash(prompt)
             if image_path:
