@@ -788,16 +788,16 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3)
                 logger.error(f"Failed to parse JSON response from Scitely: {json_e}")
                 logger.error(f"Raw response: {response_content}")
                 if attempt == retries - 1:
-                    raise
+                    break
             except ValueError as ve:
                 logger.error(f"Invalid response format: {str(ve)}")
                 if attempt == retries - 1:
-                    raise
+                    break
 
         except ScitelyAPIError as e:
             logger.error(f"Scitely API error (attempt {attempt + 1}/{retries}): {str(e)}")
             if attempt == retries - 1:
-                raise Exception(f"Failed to generate content package after {retries} attempts: {str(e)}")
+                break
 
         # If we get here, retry with exponential backoff
         wait_time = 2 ** attempt
