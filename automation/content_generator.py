@@ -494,6 +494,45 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
     return []
 
 
+def _build_fallback_content_package(topic):
+    clean_topic = re.sub(r"\s+", " ", str(topic or "Artificial Intelligence")).strip()
+    if not clean_topic:
+        clean_topic = "Artificial Intelligence"
+
+    topic_slug = re.sub(r"[^A-Za-z0-9]+", " ", clean_topic).strip() or "Artificial Intelligence"
+
+    script_lines = [
+        f"I thought about {topic_slug} all day.",
+        "It kept coming back to my mind.",
+        "I felt curious and a little nervous.",
+        "Then I decided to pay attention.",
+        "Everything started to feel more real.",
+        "I noticed small details I missed before.",
+        "The whole moment felt different.",
+        "I kept watching and thinking harder.",
+        "It was simple, but it stuck with me.",
+        "I could not stop replaying it.",
+        "It felt bigger than I expected.",
+        "That was the part I remembered most.",
+        "I wanted to see what happened next.",
+        "It made the whole thing feel personal.",
+        "I was more interested than before.",
+        "The feeling stayed with me.",
+        "I kept going back to it.",
+        "It changed how I saw it.",
+        "I did not forget that moment.",
+        "It still feels close to me.",
+    ]
+
+    return {
+        "script": "\n".join(script_lines),
+        "title": f"{clean_topic[:52]} Story I Could Not Ignore"[:60],
+        "description": f"A personal short about {clean_topic}. #shorts #ai #story #viral",
+        "thumbnail_hf_prompt": f"Close-up dramatic scene around {clean_topic}, expressive subject, strong contrast, emotional tension, clean composition",
+        "thumbnail_unsplash_query": topic_slug[:32],
+    }
+
+
 def generate_meme_insertion_plan(
     script_lines,
     topic="",
@@ -765,8 +804,12 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3)
         logger.info(f"Retrying in {wait_time} seconds (attempt {attempt + 1}/{retries})...")
         time.sleep(wait_time)
 
-    # If we get here, all retries failed
-    raise Exception(f"Failed to generate comprehensive content package after {retries} attempts")
+    logger.warning(
+        "Falling back to local content package generation for topic '%s' after %s failed attempt(s).",
+        topic,
+        retries,
+    )
+    return _build_fallback_content_package(topic)
 
 if __name__ == "__main__": # This is used to run the script directly for testing
     # Example usage for batch query generation
