@@ -165,6 +165,20 @@ class YTShortsCreator_V:
             videos_by_query = results.get("fetch_videos", {})
             audio_data = results.get("generate_audio", [])
 
+            if not audio_data:
+                logger.warning("No audio clips were generated; using silent placeholders for each section.")
+                audio_data = [None] * len(script_sections)
+            elif len(audio_data) != len(script_sections):
+                logger.warning(
+                    "Audio clip count mismatch (%s/%s); padding with silent placeholders.",
+                    len(audio_data),
+                    len(script_sections),
+                )
+                if len(audio_data) < len(script_sections):
+                    audio_data.extend([None] * (len(script_sections) - len(audio_data)))
+                else:
+                    audio_data = audio_data[:len(script_sections)]
+
             # Check if we have necessary components before continuing
             if not videos_by_query:
                 logger.error("No background videos fetched")
@@ -238,8 +252,6 @@ class YTShortsCreator_V:
                 not background_clips
                 or len(background_clips) != len(script_sections)
                 or missing_background
-                or not audio_data
-                or len(audio_data) != len(script_sections)
                 or not text_clips
                 or len(text_clips) != len(script_sections)
             ):

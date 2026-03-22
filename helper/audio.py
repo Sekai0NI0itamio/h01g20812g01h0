@@ -33,15 +33,17 @@ class AudioHelper:
         os.makedirs(self.temp_dir, exist_ok=True)
 
         self.freevoicereader_tts = None
+        use_freevoicereader = os.getenv("USE_FREEVOICEREADER_TTS", "true").lower()
+        logger.info("USE_FREEVOICEREADER_TTS=%s", use_freevoicereader)
 
-        if os.getenv("USE_FREEVOICEREADER_TTS", "true").lower() == "true":
+        if use_freevoicereader == "true":
             try:
                 from automation.voiceover_freevoicereader import FreeVoiceReaderVoiceover
 
                 self.freevoicereader_tts = FreeVoiceReaderVoiceover(output_dir=self.temp_dir)
                 logger.info("FreeVoiceReader TTS initialized successfully")
             except Exception as e:
-                logger.warning(f"Failed to initialize FreeVoiceReader TTS: {e}")
+                logger.exception("Failed to initialize FreeVoiceReader TTS")
 
     @measure_time
     def create_tts_audio(self, text, filename=None, voice_style="none"):
@@ -87,7 +89,7 @@ class AudioHelper:
                 logger.error(f"FreeVoiceReader TTS failed: {e}")
             return None
 
-        logger.error("FreeVoiceReader TTS is disabled or unavailable")
+        logger.error("FreeVoiceReader TTS is disabled or unavailable (USE_FREEVOICEREADER_TTS=%s, initialized=%s)", os.getenv("USE_FREEVOICEREADER_TTS", "true"), bool(self.freevoicereader_tts))
         return None
 
     def _sanitize_tts_text(self, text):
