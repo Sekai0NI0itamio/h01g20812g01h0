@@ -19,7 +19,9 @@ _SCITELY_DISABLED = False
 
 
 class ScitelyAPIError(RuntimeError):
-    pass
+    def __init__(self, message, provider="unknown"):
+        super().__init__(message)
+        self.provider = provider
 
 
 def get_scitely_api_key():
@@ -73,7 +75,7 @@ def disable_scitely(reason=None):
         logger.warning("Scitely disabled for the remainder of this run")
 
 
-def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temperature, response_format, stream, timeout):
+def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temperature, response_format, stream, timeout, provider_name):
     payload = {
         "model": model,
         "messages": messages,
@@ -97,7 +99,7 @@ def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temper
             timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise ScitelyAPIError(str(exc)) from exc
+        raise ScitelyAPIError(str(exc), provider=provider_name) from exc
 
     if not response.ok:
         try:
@@ -111,7 +113,7 @@ def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temper
             or response.text
             or f"HTTP {response.status_code}"
         )
-        raise ScitelyAPIError(message)
+        raise ScitelyAPIError(message, provider=provider_name)
 
     return response.json()
 
@@ -150,6 +152,7 @@ def create_chat_completion(
             response_format=response_format,
             stream=stream,
             timeout=timeout,
+            provider_name="nvidia",
         )
 
     def call_scitely():
@@ -165,6 +168,7 @@ def create_chat_completion(
             response_format=response_format,
             stream=stream,
             timeout=timeout,
+            provider_name="scitely",
         )
 
     if provider == "nvidia":

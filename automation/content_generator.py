@@ -107,7 +107,8 @@ def _create_json_completion(prompt, model, max_tokens, temperature):
             provider=provider,
         )
     except ScitelyAPIError as exc:
-        disable_scitely(exc)
+        if getattr(exc, "provider", "") == "scitely":
+            disable_scitely(exc)
         if "response_format" not in str(exc).lower():
             raise
 
@@ -257,8 +258,10 @@ def generate_batch_video_queries(texts: list[str], overall_topic="technology", m
                  logger.error(f"Error processing JSON response: {parse_e}. Response: {response_content}")
 
         except ScitelyAPIError as e:
-            logger.error(f"Scitely API error generating batch video queries (attempt {attempt + 1}/{retries}): {str(e)}")
-            disable_scitely(e)
+            provider = getattr(e, "provider", "ai")
+            logger.error(f"{provider.capitalize()} API error generating batch video queries (attempt {attempt + 1}/{retries}): {str(e)}")
+            if provider == "scitely":
+                disable_scitely(e)
 
         # If loop continues, it means an error occurred
         if attempt < retries - 1:
@@ -346,8 +349,10 @@ def generate_batch_image_prompts(texts: list[str], overall_topic="technology", m
                  logger.error(f"Error processing JSON response: {parse_e}. Response: {response_content}")
 
         except ScitelyAPIError as e:
-            logger.error(f"Scitely API error generating batch image prompts (attempt {attempt + 1}/{retries}): {str(e)}")
-            disable_scitely(e)
+            provider = getattr(e, "provider", "ai")
+            logger.error(f"{provider.capitalize()} API error generating batch image prompts (attempt {attempt + 1}/{retries}): {str(e)}")
+            if provider == "scitely":
+                disable_scitely(e)
 
         # If loop continues, it means an error occurred
         if attempt < retries - 1:
@@ -499,7 +504,7 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
                 retries,
                 e,
             )
-            if isinstance(e, ScitelyAPIError):
+            if isinstance(e, ScitelyAPIError) and getattr(e, "provider", "") == "scitely":
                 disable_scitely(e)
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
@@ -680,7 +685,7 @@ def generate_meme_insertion_plan(
                 retries,
                 e,
             )
-            if isinstance(e, ScitelyAPIError):
+            if isinstance(e, ScitelyAPIError) and getattr(e, "provider", "") == "scitely":
                 disable_scitely(e)
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
@@ -815,8 +820,10 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3)
                     break
 
         except ScitelyAPIError as e:
-            logger.error(f"Scitely API error (attempt {attempt + 1}/{retries}): {str(e)}")
-            disable_scitely(e)
+            provider = getattr(e, "provider", "ai")
+            logger.error(f"{provider.capitalize()} API error (attempt {attempt + 1}/{retries}): {str(e)}")
+            if provider == "scitely":
+                disable_scitely(e)
             if attempt == retries - 1:
                 break
 
