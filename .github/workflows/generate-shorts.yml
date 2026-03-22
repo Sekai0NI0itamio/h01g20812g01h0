@@ -45,6 +45,8 @@ jobs:
       SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
       SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
       SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
 
       PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
