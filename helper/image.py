@@ -8,6 +8,7 @@ import re
 from moviepy  import VideoClip, concatenate_videoclips, ColorClip, CompositeVideoClip, ImageClip, TextClip
 from helper.blur import custom_blur, custom_edge_blur
 from helper.minor_helper import measure_time
+from helper.network import create_requests_session
 from helper.text import TextHelper
 from dotenv import load_dotenv
 from typing import Optional, List, Tuple, Dict, Any, Union
@@ -64,6 +65,7 @@ TEMP_DIR = os.getenv("TEMP_DIR", os.path.join(os.path.dirname(os.path.dirname(__
 # Create images subdirectory
 temp_dir = os.path.join(TEMP_DIR, "generated_images")
 os.makedirs(temp_dir, exist_ok=True)  # Create temp directory if it doesn't exist
+REQUESTS_SESSION = create_requests_session()
 
 @measure_time
 def fetch_image_from_duckduckgo(query, file_path=None):
@@ -84,7 +86,7 @@ def fetch_image_from_duckduckgo(query, file_path=None):
 
     try:
         # 1) Get vqd token from initial search page.
-        token_resp = requests.get(
+        token_resp = REQUESTS_SESSION.get(
             "https://duckduckgo.com/",
             params={"q": query},
             headers=headers,
@@ -101,7 +103,7 @@ def fetch_image_from_duckduckgo(query, file_path=None):
         vqd = token_match.group(1) or token_match.group(2)
 
         # 2) Query image JSON endpoint.
-        image_resp = requests.get(
+        image_resp = REQUESTS_SESSION.get(
             "https://duckduckgo.com/i.js",
             params={
                 "q": query,
@@ -131,7 +133,7 @@ def fetch_image_from_duckduckgo(query, file_path=None):
             return None
 
         # 3) Download image.
-        download_resp = requests.get(image_url, headers=headers, timeout=12)
+        download_resp = REQUESTS_SESSION.get(image_url, headers=headers, timeout=12)
         if download_resp.status_code != 200:
             logger.warning("Failed to download DuckDuckGo image: %s", download_resp.status_code)
             return None
@@ -271,7 +273,7 @@ def _fetch_image_from_unsplash(query, file_path=None):
         }
 
         # Make request
-        response = requests.get(url, params=params)
+        response = REQUESTS_SESSION.get(url, params=params)
 
         if response.status_code == 200:
             data = response.json()
@@ -279,7 +281,7 @@ def _fetch_image_from_unsplash(query, file_path=None):
                 image_url = data["results"][0]["urls"]["regular"]
 
                 # Download image
-                img_response = requests.get(image_url)
+                img_response = REQUESTS_SESSION.get(image_url)
                 if img_response.status_code == 200:
                     with open(file_path, "wb") as f:
                         f.write(img_response.content)
@@ -326,7 +328,7 @@ def _fetch_image_from_pexels(query, file_path=None):
         }
 
         # Make request
-        response = requests.get(url, headers=headers, params=params)
+        response = REQUESTS_SESSION.get(url, headers=headers, params=params)
 
         if response.status_code == 200:
             data = response.json()
@@ -334,7 +336,7 @@ def _fetch_image_from_pexels(query, file_path=None):
                 image_url = data["photos"][0]["src"]["large"]
 
                 # Download image
-                img_response = requests.get(image_url)
+                img_response = REQUESTS_SESSION.get(image_url)
                 if img_response.status_code == 200:
                     with open(file_path, "wb") as f:
                         f.write(img_response.content)

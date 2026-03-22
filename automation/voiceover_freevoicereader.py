@@ -3,8 +3,10 @@ import os
 import time
 
 import requests
+from helper.network import create_requests_session
 
 logger = logging.getLogger(__name__)
+REQUESTS_SESSION = create_requests_session()
 
 
 class FreeVoiceReaderVoiceover:
@@ -64,7 +66,7 @@ class FreeVoiceReaderVoiceover:
         for key in ("audio_url", "audioUrl", "url", "file_url", "fileUrl"):
             audio_url = data.get(key)
             if isinstance(audio_url, str) and audio_url.strip():
-                dl = requests.get(audio_url.strip(), timeout=self.timeout)
+                dl = REQUESTS_SESSION.get(audio_url.strip(), timeout=self.timeout)
                 dl.raise_for_status()
                 with open(output_filename, "wb") as f:
                     f.write(dl.content)
@@ -87,7 +89,7 @@ class FreeVoiceReaderVoiceover:
             "title": (None, self._title_from_output_filename(output_filename)),
         }
 
-        response = requests.post(
+        response = REQUESTS_SESSION.post(
             self.api_url,
             headers=self._headers(),
             files=files,

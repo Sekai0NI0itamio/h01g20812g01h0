@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from helper.network import create_requests_session
 
 # Load environment variables
 load_dotenv()
@@ -34,6 +35,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.force-ssl",
     "https://www.googleapis.com/auth/youtube.readonly"
 ]
+REQUESTS_SESSION = create_requests_session()
 
 
 def _load_token_credentials(token_path):
@@ -91,7 +93,7 @@ def authenticate_youtube():
         try:
             if credentials and credentials.expired and credentials.refresh_token:
                 # Refresh the token if possible
-                credentials.refresh(Request())
+                credentials.refresh(Request(session=REQUESTS_SESSION))
                 print("🔄 Token refreshed successfully!")
             else:
                 # Check if client secrets file exists

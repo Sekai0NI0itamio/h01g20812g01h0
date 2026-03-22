@@ -9,6 +9,8 @@ from google.auth.transport.requests import Request
 from dotenv import load_dotenv
 import io
 import httplib2
+from google_auth_httplib2 import AuthorizedHttp
+from helper.network import get_httplib2_proxy_info
 
 # Configure logging - don't use basicConfig since main.py handles this
 logger = logging.getLogger(__name__)
@@ -52,7 +54,9 @@ def _resumable_upload(insert_request):
 def get_authenticated_service():
     """Load YouTube API credentials."""
     credentials = authenticate_youtube()
-    return googleapiclient.discovery.build("youtube", "v3", credentials=credentials) #
+    proxy_info = get_httplib2_proxy_info()
+    authed_http = AuthorizedHttp(credentials, http=httplib2.Http(proxy_info=proxy_info)) if proxy_info else AuthorizedHttp(credentials)
+    return googleapiclient.discovery.build("youtube", "v3", http=authed_http, cache_discovery=False)
 
 def upload_video(youtube, file_path, title, description, tags, thumbnail_path=None, privacy="public"):
     """

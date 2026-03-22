@@ -13,11 +13,13 @@ import shutil
 
 # Custom helpers
 from helper.minor_helper import measure_time, cleanup_temp_directories
+from helper.network import create_requests_session
 from helper.shorts_assets import get_default_font_path
 from helper.image import fetch_image_from_duckduckgo, get_unsplash_api_key
 
 # Configure logging
 logger = logging.getLogger(__name__)
+REQUESTS_SESSION = create_requests_session()
 
 # Timer function for performance monitoring
 def measure_time(func):
@@ -80,7 +82,7 @@ class ThumbnailGenerator:
             url = "https://api.pexels.com/v1/search"
             headers = {"Authorization": self.pexels_api_key}
             params = {"query": query, "per_page": 20, "orientation": "portrait"}
-            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response = REQUESTS_SESSION.get(url, headers=headers, params=params, timeout=10)
             if response.status_code != 200:
                 return None
 
@@ -93,7 +95,7 @@ class ThumbnailGenerator:
             if not image_url:
                 return None
 
-            img_response = requests.get(image_url, timeout=10)
+            img_response = REQUESTS_SESSION.get(image_url, timeout=10)
             if img_response.status_code != 200:
                 return None
 
@@ -123,7 +125,7 @@ class ThumbnailGenerator:
                 "safesearch": "true",
                 "orientation": "vertical",
             }
-            response = requests.get(url, params=params, timeout=10)
+            response = REQUESTS_SESSION.get(url, params=params, timeout=10)
             if response.status_code != 200:
                 return None
 
@@ -136,7 +138,7 @@ class ThumbnailGenerator:
             if not image_url:
                 return None
 
-            img_response = requests.get(image_url, timeout=10)
+            img_response = REQUESTS_SESSION.get(image_url, timeout=10)
             if img_response.status_code != 200:
                 return None
 
@@ -186,7 +188,7 @@ class ThumbnailGenerator:
                 "client_id": self.unsplash_api_key
             }
 
-            response = requests.get(self.unsplash_api_url, params=params, timeout=10)
+            response = REQUESTS_SESSION.get(self.unsplash_api_url, params=params, timeout=10)
 
             if response.status_code == 200:
                 data = response.json()
@@ -199,7 +201,7 @@ class ThumbnailGenerator:
                     image_url = image_data["urls"]["regular"]
 
                     # Download the image
-                    img_response = requests.get(image_url, timeout=10)
+                    img_response = REQUESTS_SESSION.get(image_url, timeout=10)
                     if img_response.status_code == 200:
                         with open(file_path, "wb") as f:
                             f.write(img_response.content)

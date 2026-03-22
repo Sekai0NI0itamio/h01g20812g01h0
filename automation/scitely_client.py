@@ -2,8 +2,11 @@ import os
 
 import requests
 from dotenv import load_dotenv
+from helper.network import create_requests_session
 
 load_dotenv()
+
+REQUESTS_SESSION = create_requests_session()
 
 DEFAULT_SCITELY_BASE_URL = "https://api.scitely.com/v1"
 DEFAULT_SCITELY_MODEL = "deepseek-v3.2"
@@ -52,7 +55,7 @@ def create_chat_completion(
     if response_format is not None:
         payload["response_format"] = response_format
 
-    response = requests.post(
+    response = REQUESTS_SESSION.post(
         f"{get_scitely_base_url()}/chat/completions",
         headers={
             "Authorization": f"Bearer {api_key}",

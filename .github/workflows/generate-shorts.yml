@@ -25,6 +25,11 @@ on:
         required: true
         default: false
         type: boolean
+      use_tor_tunnel:
+        description: Route API requests through Tor SOCKS5 tunnel
+        required: true
+        default: true
+        type: boolean
 
 jobs:
   generate-shorts:
@@ -34,6 +39,8 @@ jobs:
       PYTHONUNBUFFERED: "1"
       USE_C05_LOCAL_KEYS: "false"
       ENABLE_YOUTUBE_UPLOAD: ${{ inputs.upload_to_youtube }}
+      ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
+      TOR_PROXY_URL: socks5h://127.0.0.1:9050
 
       SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
       SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
@@ -64,6 +71,24 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg imagemagick
+
+      - name: Install and start Tor tunnel
+        if: ${{ inputs.use_tor_tunnel }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor netcat-openbsd
+          mkdir -p "$RUNNER_TEMP/tor-data"
+          tor --RunAsDaemon 1 --SocksPort 9050 --DataDirectory "$RUNNER_TEMP/tor-data" --Log "notice file $RUNNER_TEMP/tor.log"
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 9050; then
+              echo "Tor SOCKS proxy is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Tor failed to start"
+          cat "$RUNNER_TEMP/tor.log" || true
+          exit 1
 
       - name: Install Python dependencies
         run: |
