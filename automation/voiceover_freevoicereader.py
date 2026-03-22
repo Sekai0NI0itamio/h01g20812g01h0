@@ -9,6 +9,28 @@ logger = logging.getLogger(__name__)
 REQUESTS_SESSION = create_requests_session()
 
 
+def _env_or_default(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
+def _env_int_or_default(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", name, value, default)
+        return default
+
+
 class FreeVoiceReaderVoiceover:
     """
     FreeVoiceReader client using the /api/free-tts multipart form endpoint.
@@ -18,12 +40,12 @@ class FreeVoiceReaderVoiceover:
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
-        self.timeout = int(os.getenv("FREEVOICEREADER_TTS_TIMEOUT", "90"))
-        self.voice = os.getenv("FREEVOICEREADER_TTS_VOICE", "en-TZ-ElimuNeural")
-        self.api_url = os.getenv(
+        self.timeout = _env_int_or_default("FREEVOICEREADER_TTS_TIMEOUT", 90)
+        self.voice = _env_or_default("FREEVOICEREADER_TTS_VOICE", "en-TZ-ElimuNeural")
+        self.api_url = _env_or_default(
             "FREEVOICEREADER_TTS_API_URL",
             "https://www.freevoicereader.com/api/free-tts",
-        ).strip()
+        )
 
     def _headers(self):
         headers = {
