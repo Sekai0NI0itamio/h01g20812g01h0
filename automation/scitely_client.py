@@ -142,14 +142,16 @@ def create_chat_completion(
     def call_nvidia():
         if not nvidia_api_key:
             raise ValueError("NVIDIA_API_KEY is not set")
+        # NVIDIA Integrate API is OpenAI-compatible, but this project keeps
+        # requests minimal to avoid host-specific param mismatches.
         return _post_chat_completion(
             base_url=get_nvidia_base_url(),
             api_key=nvidia_api_key,
             model=get_nvidia_model(),
             messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            response_format=response_format,
+            max_tokens=None,
+            temperature=None,
+            response_format=None,
             stream=stream,
             timeout=timeout,
             provider_name="nvidia",

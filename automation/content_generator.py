@@ -97,6 +97,16 @@ def _extract_completion_content(response):
 
 def _create_json_completion(prompt, model, max_tokens, temperature):
     provider = "nvidia" if is_scitely_disabled() else get_default_chat_provider()
+    if provider == "nvidia":
+        response = create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            provider="nvidia",
+        )
+        return _extract_completion_content(response)
+
     try:
         response = create_chat_completion(
             messages=[{"role": "user", "content": prompt}],
