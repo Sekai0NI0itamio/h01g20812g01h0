@@ -77,8 +77,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y tor netcat-openbsd
-          mkdir -p "$RUNNER_TEMP/tor-data"
-          tor --RunAsDaemon 1 --SocksPort 9050 --DataDirectory "$RUNNER_TEMP/tor-data" --Log "notice file $RUNNER_TEMP/tor.log"
+          if nc -z 127.0.0.1 9050; then
+            echo "Tor SOCKS proxy already available on 127.0.0.1:9050"
+            exit 0
+          fi
+
+          sudo service tor start || sudo systemctl start tor || true
           for i in $(seq 1 30); do
             if nc -z 127.0.0.1 9050; then
               echo "Tor SOCKS proxy is ready"
@@ -86,8 +90,8 @@ jobs:
             fi
             sleep 1
           done
-          echo "Tor failed to start"
-          cat "$RUNNER_TEMP/tor.log" || true
+          echo "Tor failed to start or bind 127.0.0.1:9050"
+          sudo service tor status || true
           exit 1
 
       - name: Install Python dependencies
