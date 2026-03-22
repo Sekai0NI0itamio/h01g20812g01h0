@@ -8,6 +8,7 @@ from automation.scitely_client import (
     ScitelyAPIError,
     create_chat_completion,
     disable_scitely,
+    get_default_chat_provider,
     is_scitely_disabled,
     get_scitely_api_key,
     get_scitely_model,
@@ -95,7 +96,7 @@ def _extract_completion_content(response):
 
 
 def _create_json_completion(prompt, model, max_tokens, temperature):
-    provider = "nvidia" if is_scitely_disabled() else "auto"
+    provider = "nvidia" if is_scitely_disabled() else get_default_chat_provider()
     try:
         response = create_chat_completion(
             messages=[{"role": "user", "content": prompt}],
@@ -196,7 +197,7 @@ def generate_batch_video_queries(texts: list[str], overall_topic="technology", m
         dict: A dictionary mapping the index (int) of the input text to the generated query string (str).
               Returns an empty dictionary on failure after retries.
     """
-    if not get_scitely_api_key():
+    if not get_scitely_api_key() and get_default_chat_provider() != "nvidia":
         raise ValueError("Scitely API key is not set. Please set SCITELY_API_KEY in .env.")
 
     model = model or get_scitely_model()
@@ -282,7 +283,7 @@ def generate_batch_image_prompts(texts: list[str], overall_topic="technology", m
         dict: A dictionary mapping the index (int) of the input text to the generated image prompt (str).
               Returns an empty dictionary on failure after retries.
     """
-    if not get_scitely_api_key():
+    if not get_scitely_api_key() and get_default_chat_provider() != "nvidia":
         raise ValueError("Scitely API key is not set. Please set SCITELY_API_KEY in .env.")
 
     model = model or get_scitely_model()
@@ -565,7 +566,7 @@ def generate_meme_insertion_plan(
     if not script_lines:
         return []
 
-    if not get_scitely_api_key():
+    if not get_scitely_api_key() and get_default_chat_provider() != "nvidia":
         logger.warning("Scitely API key not available; skipping meme insertion planning")
         return []
 
@@ -705,7 +706,8 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3)
             - thumbnail_unsplash_query: Simple query for Unsplash image search
     """
     if not get_scitely_api_key():
-        raise ValueError("Scitely API key is not set. Please set SCITELY_API_KEY in .env.")
+        if get_default_chat_provider() != "nvidia":
+            raise ValueError("Scitely API key is not set. Please set SCITELY_API_KEY in .env.")
 
     model = model or get_scitely_model()
     if is_scitely_disabled():

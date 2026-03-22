@@ -46,6 +46,17 @@ def get_nvidia_model(default=None):
     return os.getenv("NVIDIA_MODEL", default or DEFAULT_NVIDIA_MODEL)
 
 
+def get_default_chat_provider():
+    provider = os.getenv("AI_PROVIDER", "").strip().lower()
+    if provider in {"scitely", "nvidia"}:
+        return provider
+
+    if os.getenv("GITHUB_ACTIONS", "false").strip().lower() == "true":
+        return "nvidia"
+
+    return "auto"
+
+
 def is_scitely_disabled():
     return _SCITELY_DISABLED
 
@@ -72,15 +83,18 @@ def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temper
     if response_format is not None:
         payload["response_format"] = response_format
 
-    response = REQUESTS_SESSION.post(
-        f"{base_url}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=timeout,
-    )
+    try:
+        response = REQUESTS_SESSION.post(
+            f"{base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise ScitelyAPIError(str(exc)) from exc
 
     if not response.ok:
         try:
@@ -116,7 +130,7 @@ def create_chat_completion(
 
     scitely_error = None
 
-    provider = (provider or "auto").strip().lower()
+    provider = (provider or get_default_chat_provider()).strip().lower()
     if provider not in {"auto", "scitely", "nvidia"}:
         raise ValueError(f"Unsupported provider: {provider}")
 

@@ -7,7 +7,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from automation.scitely_client import ScitelyAPIError, create_chat_completion, get_scitely_model
+from automation.scitely_client import (
+    ScitelyAPIError,
+    create_chat_completion,
+    get_default_chat_provider,
+    get_scitely_model,
+)
 from helper.minor_helper import ensure_output_directory
 from main import creator_from_choice, generate_youtube_short
 
@@ -85,18 +90,28 @@ def generate_auto_topic(direction: str, index: int, used_topics: set[str]) -> st
         f"{used_list}"
     )
 
-    try:
-        response = create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            model=get_scitely_model(),
-            max_tokens=64,
-            temperature=0.95,
-        )
-        topic = _clean_topic(_extract_completion_content(response))
-        if topic and topic not in used_topics:
-            return topic
-    except (ScitelyAPIError, ValueError, RuntimeError) as exc:
-        logger.warning("Topic generation failed for item %s: %s", index, exc)
+    provider = get_default_chat_provider()
+    for attempt in range(3):
+        try:
+            response = create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=get_scitely_model(),
+                max_tokens=64,
+                temperature=0.95,
+                provider=provider,
+            )
+            topic = _clean_topic(_extract_completion_content(response))
+            if topic and topic not in used_topics:
+                return topic
+            logger.warning("Topic generation returned empty or duplicate result for item %s on attempt %s/3", index, attempt + 1)
+        except (ScitelyAPIError, ValueError, RuntimeError) as exc:
+            logger.warning("Topic generation failed for item %s on attempt %s/3: %s", index, attempt + 1, exc)
+            if attempt < 2:
+                continue
+            if provider != "nvidia":
+                provider = "nvidia"
+                logger.info("Switching topic generation to NVIDIA after repeated failures")
+                continue
 
     fallback_base = direction_text or "Artificial Intelligence"
     fallback_topic = f"{fallback_base} trend #{index}"
