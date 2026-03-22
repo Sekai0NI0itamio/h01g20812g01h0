@@ -51,6 +51,9 @@ def get_default_chat_provider():
     if provider in {"scitely", "nvidia"}:
         return provider
 
+    if get_nvidia_api_key():
+        return "nvidia"
+
     if os.getenv("GITHUB_ACTIONS", "false").strip().lower() == "true":
         return "nvidia"
 
