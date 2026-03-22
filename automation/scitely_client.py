@@ -1,4 +1,5 @@
 import os
+import logging
 
 import requests
 from dotenv import load_dotenv
@@ -7,11 +8,14 @@ from helper.network import create_requests_session
 load_dotenv()
 
 REQUESTS_SESSION = create_requests_session()
+logger = logging.getLogger(__name__)
 
 DEFAULT_SCITELY_BASE_URL = "https://api.scitely.com/v1"
 DEFAULT_SCITELY_MODEL = "deepseek-v3.2"
 DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
+
+_SCITELY_DISABLED = False
 
 
 class ScitelyAPIError(RuntimeError):
@@ -91,12 +95,14 @@ def create_chat_completion(
     stream=False,
     timeout=90,
 ):
+    global _SCITELY_DISABLED
+
     scitely_api_key = get_scitely_api_key()
     nvidia_api_key = get_nvidia_api_key()
 
     scitely_error = None
 
-    if scitely_api_key:
+    if scitely_api_key and not _SCITELY_DISABLED:
         try:
             return _post_chat_completion(
                 base_url=get_scitely_base_url(),
@@ -111,6 +117,11 @@ def create_chat_completion(
             )
         except ScitelyAPIError as exc:
             scitely_error = exc
+            _SCITELY_DISABLED = True
+            if nvidia_api_key:
+                logger.warning("Scitely chat completion failed; switching to NVIDIA for subsequent requests: %s", exc)
+            else:
+                logger.warning("Scitely chat completion failed and no NVIDIA key is configured: %s", exc)
 
     if nvidia_api_key:
         return _post_chat_completion(
