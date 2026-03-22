@@ -1,0 +1,935 @@
+# C05 Local AI Proxy Manual
+
+Version: 2.2
+Last Updated: 2026-03-22
+
+## 1. Overview
+
+C05 Local AI Proxy is a FastAPI-based multi-provider chat and provider-API gateway that:
+
+- Accepts a unified `/chat` request format.
+- Routes requests to one of several hosters (providers).
+- Streams responses back as NDJSON events.
+- Proxies provider-native API requests for non-chat services.
+- Manages API keys and key exhaustion.
+- Persists optional conversation history to local JSON files.
+- Exposes hoster, model, and provider-operation discovery endpoints for client apps.
+
+Current supported hosters:
+
+- `poe` (default)
+- `openrouter`
+- `googlegemini`
+- `nvidia`
+- `huggingface`
+- `groq`
+- `scitely`
+- `pexels`
+- `newsapi`
+- `unsplash`
+- `pixabay`
+
+## 2. What This App Provides
+
+### Core capabilities
+
+- Multi-hoster text chat via one endpoint: `POST /chat`
+- Provider-native API requests via `POST /hosters/{hoster_name}/api/request`
+- Media download proxying via `POST /hosters/{hoster_name}/api/download`
+- Server-side session persistence (opt-in per request via `include_history`)
+- Request cancellation for in-flight streams via `POST /stop`
+- Recent request introspection via `GET /requests/most_recent`
+- Recent conversation listing via `GET /api/conversations/recent`
+- Hoster discovery via `GET /hosters`
+- Provider operation discovery via `GET /hosters/{hoster_name}/operations`
+- Model discovery via:
+  - `GET /hosters/{hoster_name}/models`
+  - `GET /models`
+- Model detail lookup via:
+  - `GET /hosters/{hoster_name}/models/{model_id}`
+
+### Key management
+
+- Loads keys from `keys/{hoster}.txt`.
+- Tracks exhausted keys in `KeysUsedUp.txt`.
+- Auto-refreshes exhausted-key tracking daily at 08:00 Beijing time.
+- Tag systems:
+  - `rotational` (poe, openrouter) — rotate keys and mark used-up on quota errors.
+  - `stress_based` (nvidia) — rate-limited per key (default: 40 rpm).
+  - `pickleastused` (huggingface, groq, scitely, pexels, newsapi, unsplash, pixabay) — prefer least-active key, no exhaustion tracking.
+
+### Streaming interface
+
+- Returns NDJSON (`application/x-ndjson`) with event lines such as:
+  - stream start metadata
+  - content chunks
+  - tool call chunks (when present)
+  - end status
+
+## 3. Project Layout
+
+```text
+.
+├── main.py                     # entrypoint wrapper
+├── app/main.py                 # FastAPI app + CLI startup
+├── app/api/routes.py           # all API routes
+├── app/api/models.py           # request models
+├── app/hosters/                # provider implementations
+├── app/core/keyring.py         # key rotation and usage tracking
+├── app/storage/sessions.py     # local session persistence
+├── keys/
+│   ├── poe.txt
+│   ├── openrouter.txt
+│   ├── googlegemini.txt
+│   ├── nvidia.txt
+│   ├── huggingface.txt
+│   ├── groq.txt
+│   ├── scitely.txt
+│   ├── pexels.txt
+│   ├── newsapi.txt
+│   ├── unsplash.txt
+│   └── pixabay.txt
+├── KeysUsedUp.txt              # exhausted key records
+└── sessions/                   # persisted conversation data
+```
+
+## 4. Requirements and Setup
+
+### Runtime prerequisites
+
+- Python 3.9+
+- Network access to provider APIs
+- Valid provider API keys in `keys/*.txt`
+
+### Required packages
+
+At minimum, this project requires FastAPI and provider SDKs used by your hosters.
+Gemini hoster specifically requires:
+
+```bash
+pip install -U google-genai
+```
+
+If Gemini SDK is missing and `googlegemini` is used, requests will fail with a runtime error.
+
+### Key files
+
+Create one key per line.
+
+Example `keys/poe.txt`:
+
+```text
+pk-xxxx
+pk-yyyy
+```
+
+Comments and empty lines are allowed (`# comment`).
+
+## 5. Running the Server
+
+### Start normally
+
+```bash
+python main.py
+```
+
+### Useful CLI flags
+
+```bash
+python main.py --host 0.0.0.0 --port 8129 --debug
+```
+
+- `--debug`: enables debug logs (`C04POE_DEBUG=1` behavior)
+- `--reset`: clears `KeysUsedUp.txt` before startup
+- `--no-reload`: disables auto-reload
+- `--ekau`: currently a no-op (kept for CLI compatibility)
+
+Default bind:
+
+- host: `0.0.0.0`
+- port: `8129`
+
+## 6. API Summary
+
+### Endpoints
+
+- `GET /hosters`
+- `GET /hosters/{hoster_name}/operations`
+- `GET /hosters/{hoster_name}/models`
+- `GET /hosters/{hoster_name}/models/{model_id}`
+- `GET /models`
+- `POST /hosters/{hoster_name}/api/request`
+- `POST /hosters/{hoster_name}/api/download`
+- `POST /chat`
+- `POST /stop`
+- `GET /requests/most_recent`
+- `POST /session/history`
+- `GET /session/history/latest`
+- `GET /api/conversations/recent`
+
+## 7. Streaming Protocol (`POST /chat`)
+
+`POST /chat` returns newline-delimited JSON objects.
+Clients should read line-by-line and parse each non-empty line as JSON.
+
+### Typical event sequence
+
+1. Start line:
+
+```json
+{"status":"start","session_id":"...","app_id":"...","created_new":true,"request_id":"..."}
+```
+
+2. Zero or more content lines:
+
+```json
+{"event":"content","content":"Hello"}
+```
+
+3. Optional tool call lines:
+
+```json
+{"event":"tool_calls","tool_calls":[...],"request_id":"..."}
+```
+
+4. End line:
+
+```json
+{"status":"end","session_id":"...","app_id":"...","request_id":"...","finish_reason":"stop"}
+```
+
+### Error lines inside stream
+
+Some failures are emitted in-band as NDJSON while HTTP status is still 200:
+
+```json
+{"error":"All keys failed or were exhausted.","last_error":"..."}
+```
+
+or
+
+```json
+{"status":"cancelled","request_id":"..."}
+```
+
+### Immediate HTTP errors
+
+Invalid request shape or routing issues return direct HTTP errors (4xx/5xx), for example:
+
+- Unknown hoster
+- Missing `model`
+- Chat requested against a non-chat hoster such as `pexels`
+- No usable API keys (rotational providers)
+
+## 8. `/chat` Request Contract
+
+### Request body fields
+
+```json
+{
+  "user_prompt": "Hello",
+  "model": "claude-3-5-sonnet",
+  "hoster": "poe",
+  "system_prompt": "You are concise.",
+  "system_notes": ["Use bullet points."],
+  "session_id": "my-session",
+  "app_id": "my-app",
+  "include_history": true,
+  "max_history": 40,
+  "history": [
+    {"role": "user", "content": "Earlier message"},
+    {"role": "assistant", "content": "Earlier response"}
+  ],
+  "extra_body": {
+    "temperature": 0.7,
+    "max_tokens": 512
+  },
+  "reasoning_effort": "low",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}
+```
+
+### Notes on behavior
+
+- `model` is required and must be non-empty.
+- `hoster` defaults to `poe` if omitted.
+- If `session_id` is omitted, server generates one.
+- If `include_history` is true, prior session history is loaded and appended.
+- `max_history` only limits how much prior history is loaded for the request.
+- Session files are trimmed to max 40 messages when persisted.
+
+## 9. Hoster-Specific Behavior
+
+## 9.1 Poe (`hoster: "poe"`)
+
+- Base URL: `https://api.poe.com/v1`
+- OpenAI-compatible chat endpoint used internally.
+- `extra_body` transformations:
+  - `max_completion_tokens` -> `max_tokens`
+  - drops unsupported params: `parallel_tool_calls`, `seed`
+
+## 9.2 OpenRouter (`hoster: "openrouter"`)
+
+- Base URL: `https://openrouter.ai/api/v1`
+- OpenAI-compatible passthrough.
+- `extra_body` forwarded as-is.
+
+## 9.3 NVIDIA (`hoster: "nvidia"`)
+
+- Base URL: `https://integrate.api.nvidia.com/v1`
+- Uses stress-based key scheduling.
+- Default stress config in registry:
+  - `max_requests_per_minute = 40`
+  - `time_window_seconds = 60`
+- `reasoning_effort` currently mapped to:
+
+```json
+"chat_template_kwargs": {
+  "enable_thinking": true,
+  "clear_thinking": false
+}
+```
+
+(Any non-empty `reasoning_effort` enables thinking in current implementation.)
+
+## 9.4 Google Gemini (`hoster: "googlegemini"`)
+
+- Uses `google-genai` SDK (`from google import genai`).
+- Streams via `client.models.generate_content_stream(...)`.
+- System messages are collapsed into `system_instruction`.
+- `reasoning_effort` mapping:
+  - `low|medium|high` -> `thinking_config.thinking_level`
+  - numeric -> `thinking_config.thinking_budget`
+  - `none|off|false|0` -> `thinking_budget = 0`
+- Token aliases accepted through `extra_body`:
+  - `max_output_tokens`
+  - `max_tokens`
+  - `max_completion_tokens`
+
+Gemini bridge limitations in current implementation:
+
+- Tool/function calling params are accepted at `/chat` level but not forwarded by Gemini hoster yet.
+- Content bridge is text-first (it supports text and text-part structures, not full multimodal payload bridging).
+
+## 9.5 Pexels (`hoster: "pexels"`)
+
+- Base URL: `https://api.pexels.com`
+- Chat completions are not supported.
+- Model discovery is not supported.
+- Provider-native media operations are exposed instead:
+  - `search_photos`
+  - `curated_photos`
+  - `get_photo`
+  - `search_videos`
+  - `popular_videos`
+  - `get_video`
+- Downloadable asset URLs returned by Pexels can be proxied through:
+  - `POST /hosters/pexels/api/download`
+- Returned media objects include creator and attribution fields so clients can link back to Pexels and the original creator.
+
+## 9.6 NewsAPI (`hoster: "newsapi"`)
+
+- Base URL: `https://newsapi.org`
+- Chat completions are not supported.
+- Model discovery is not supported.
+- Provider-native news operations:
+  - `top_headlines`
+  - `everything`
+  - `sources`
+- Returns normalized article/source metadata and preserves raw provider payloads when `include_raw=true`.
+
+## 9.7 Unsplash (`hoster: "unsplash"`)
+
+- Base URL: `https://api.unsplash.com`
+- Chat completions are not supported.
+- Model discovery is not supported.
+- `unsplash.txt` is parsed as 3-line account bundles:
+  - `Application ID <value>`
+  - `Access Key <value>`
+  - `Secret Key <value>`
+- C05 rotates Unsplash accounts by Access Key, because public API requests use the Access Key.
+- Provider-native photo operations:
+  - `list_photos`
+  - `search_photos`
+  - `get_photo`
+  - `random_photo`
+  - `track_photo_download`
+- Unsplash images should be used via the returned `urls.*` and `links.download_location` fields rather than proxied downloads.
+
+## 9.8 Pixabay (`hoster: "pixabay"`)
+
+- Base URL: `https://pixabay.com`
+- Chat completions are not supported.
+- Model discovery is not supported.
+- Provider-native media operations:
+  - `search_images`
+  - `get_image`
+  - `search_videos`
+  - `get_video`
+- Downloadable asset URLs returned by Pixabay can be proxied through:
+  - `POST /hosters/pixabay/api/download`
+
+## 10. Hoster Discovery, Models, and Provider APIs
+
+### `GET /hosters`
+
+Returns hosters known by this server and key status summary.
+
+Example response:
+
+```json
+{
+  "default_hoster": "poe",
+  "hosters": [
+    {
+      "hoster": "poe",
+      "is_default": true,
+      "configured_keys": 2,
+      "usable_keys": 2,
+      "tag_system": "rotational",
+      "has_configured_keys": true,
+      "capabilities": {
+        "chat": true,
+        "models": true,
+        "api_requests": false,
+        "downloads": false
+      },
+      "operation_count": 0
+    },
+    {
+      "hoster": "pexels",
+      "is_default": false,
+      "configured_keys": 1,
+      "usable_keys": 1,
+      "tag_system": "pickleastused",
+      "has_configured_keys": true,
+      "capabilities": {
+        "chat": false,
+        "models": false,
+        "api_requests": true,
+        "downloads": true
+      },
+      "operation_count": 6
+    }
+  ]
+}
+```
+
+### `GET /hosters/{hoster_name}/models?include_raw=false`
+
+Returns normalized model metadata for one hoster.
+Non-model hosters such as `pexels`, `newsapi`, `unsplash`, and `pixabay` return `400` here and should use `GET /hosters/{hoster_name}/operations` instead.
+
+Example:
+
+```bash
+curl "http://localhost:8129/hosters/openrouter/models"
+```
+
+### `GET /models?hoster=...&include_raw=false`
+
+- Without `hoster`: returns model lists for all hosters.
+- With `hoster`: same as per-hoster endpoint.
+- Hosters that do not expose models return an error payload in the aggregated response.
+
+### `GET /hosters/{hoster_name}/operations`
+
+Returns provider-native operations for hosters that are not purely chat/model based.
+
+Example:
+
+```bash
+curl "http://localhost:8129/hosters/pexels/operations"
+```
+
+Example response (trimmed):
+
+```json
+{
+  "hoster": "pexels",
+  "count": 6,
+  "operations": [
+    {
+      "operation": "search_photos",
+      "category": "photos",
+      "required_params": ["query"],
+      "optional_params": ["orientation", "size", "color", "locale", "page", "per_page"]
+    },
+    {
+      "operation": "search_videos",
+      "category": "videos",
+      "required_params": ["query"],
+      "optional_params": ["orientation", "size", "locale", "page", "per_page"]
+    }
+  ]
+}
+```
+
+### `POST /hosters/{hoster_name}/api/request`
+
+Executes a provider-native operation using the selected hoster key.
+
+Example request:
+
+```json
+{
+  "operation": "search_photos",
+  "params": {
+    "query": "aurora",
+    "per_page": 2
+  },
+  "include_raw": false
+}
+```
+
+Example response shape:
+
+```json
+{
+  "hoster": "pexels",
+  "operation": "search_photos",
+  "result": {
+    "media_type": "photo",
+    "count": 2,
+    "items": [
+      {
+        "id": 123,
+        "download_options": [
+          {
+            "variant": "original",
+            "asset_url": "https://images.pexels.com/..."
+          }
+        ],
+        "default_download": {
+          "variant": "original",
+          "asset_url": "https://images.pexels.com/..."
+        }
+      }
+    ],
+    "rate_limit": {
+      "limit": 20000,
+      "remaining": 19995,
+      "reset_unix": 1770000000
+    }
+  }
+}
+```
+
+### `POST /hosters/{hoster_name}/api/download`
+
+Streams a downloadable asset URL returned by the provider back through C05.
+
+Request:
+
+```json
+{
+  "asset_url": "https://images.pexels.com/photos/3573351/pexels-photo-3573351.png"
+}
+```
+
+### Model metadata normalization
+
+For OpenAI-style providers (Poe/OpenRouter/NVIDIA), normalized fields can include:
+
+- `id`, `name`, `object`, `created`, `owned_by`
+- `description`, `context_length`, `max_completion_tokens`
+- `pricing`, `input_modalities`, `output_modalities`, `supported_parameters`
+
+For Gemini, fields can include:
+
+- `id`, `name`, `display_name`, `description`
+- `input_token_limit`, `output_token_limit`
+- `supported_actions`, `supported_generation_methods`, `version`
+
+When `include_raw=true`, raw provider payload is added under `raw`.
+
+## 11. Session APIs
+
+### `POST /session/history`
+
+Request:
+
+```json
+{"app_id":"my-app","session_id":"my-session"}
+```
+
+Response:
+
+```json
+{"session_id":"my-session","messages":[...]}
+```
+
+Returns 404 if session file is missing/empty.
+
+### `GET /session/history/latest`
+
+Query params:
+
+- `app_id` (optional)
+- `include_full` (optional bool)
+
+Returns metadata about most recently modified session.
+
+## 12. Recent Requests and Conversation Listing
+
+### `GET /requests/most_recent`
+
+Returns latest in-memory request record:
+
+- `request_id`, `session_id`, `app_id`
+- `start_time`, `last_update_time`, `finished_time`
+- `user_prompt`, `assistant_preview`
+- `status` (`running`, `finished`, `failed`, `cancelled`)
+
+### `GET /api/conversations/recent`
+
+Query params:
+
+- `count` (default `10`)
+- `single` (optional bool, only sessions with one completed turn)
+
+Response includes:
+
+- `sessionId`, `createdAt`, `lastMessageAt`, `messageCount`
+
+## 13. Stop API
+
+### `POST /stop`
+
+Request:
+
+```json
+{"request_id":"<from chat start event>"}
+```
+
+Response when successful:
+
+```json
+{"status":"stopping","request_id":"..."}
+```
+
+If request ID is unknown or already finished, returns 404.
+
+## 14. Key Management and Limits
+
+## 14.1 Key files
+
+- `keys/poe.txt`
+- `keys/openrouter.txt`
+- `keys/googlegemini.txt`
+- `keys/nvidia.txt`
+- `keys/huggingface.txt`
+- `keys/groq.txt`
+- `keys/scitely.txt`
+- `keys/pexels.txt`
+- `keys/newsapi.txt`
+- `keys/unsplash.txt`
+- `keys/pixabay.txt`
+
+Each line is one key. Lines starting with `#` are ignored.
+
+## 14.2 Exhausted key tracking
+
+File: `KeysUsedUp.txt`
+
+Format:
+
+```text
+hoster:key
+```
+
+When a request error indicates rate/quota limit, key is marked used-up and persisted.
+
+## 14.3 Daily refresh
+
+- Exhausted key state resets daily at 08:00 Beijing time.
+- Refresh is checked at startup, then during requests (throttled to about once per minute per keyring).
+
+## 14.4 Retry behavior
+
+- Max retries per key: `3`
+- Rotational providers iterate through usable keys.
+- Stress-based providers (NVIDIA) wait for capacity and retry per-key.
+- Pick-least-used providers (HuggingFace, Groq, Scitely, Pexels) prefer the least-active key.
+
+## 15. Session Persistence Details
+
+- Stored under: `sessions/{sanitized_app_id}/{sanitized_session_id}.json`
+- IDs are sanitized to `[A-Za-z0-9_-]` (others become `_`).
+- Writes are atomic (`.tmp` then replace).
+- `MAX_HISTORY_MESSAGES = 40`
+- Overlap dedup logic prevents duplicate append blocks.
+
+## 16. Concrete Usage Examples
+
+### 16.1 Minimal chat (default hoster = Poe)
+
+```bash
+curl -N -X POST http://localhost:8129/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "user_prompt": "Explain recursion in one paragraph"
+  }'
+```
+
+### 16.2 Chat using OpenRouter
+
+```bash
+curl -N -X POST http://localhost:8129/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hoster": "openrouter",
+    "model": "openai/gpt-4o-mini",
+    "user_prompt": "Write 3 bullet points about TCP",
+    "extra_body": {"temperature": 0.7, "max_tokens": 180}
+  }'
+```
+
+### 16.3 Chat using NVIDIA with reasoning
+
+```bash
+curl -N -X POST http://localhost:8129/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hoster": "nvidia",
+    "model": "nvidia/llama-3.1-nemotron-70b-instruct",
+    "reasoning_effort": "high",
+    "user_prompt": "Solve: 17*19 with steps"
+  }'
+```
+
+### 16.4 Chat using Google Gemini
+
+```bash
+curl -N -X POST http://localhost:8129/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hoster": "googlegemini",
+    "model": "gemini-3-flash-preview",
+    "reasoning_effort": "low",
+    "user_prompt": "Give a short explanation of transformers",
+    "extra_body": {"max_tokens": 200}
+  }'
+```
+
+### 16.5 Continue an existing session
+
+```bash
+curl -N -X POST http://localhost:8129/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "app_id": "assistant-web",
+    "session_id": "user-42",
+    "include_history": true,
+    "hoster": "poe",
+    "model": "claude-3-5-sonnet-20241022",
+    "user_prompt": "Continue from where we left off"
+  }'
+```
+
+### 16.6 Fetch models for all hosters
+
+```bash
+curl "http://localhost:8129/models"
+```
+
+### 16.7 Fetch models for one hoster with raw payloads
+
+```bash
+curl "http://localhost:8129/hosters/googlegemini/models?include_raw=true"
+```
+
+### 16.8 Stop a running request
+
+Step 1: start a chat and capture `request_id` from the first `status:start` line.
+
+Step 2:
+
+```bash
+curl -X POST http://localhost:8129/stop \
+  -H "Content-Type: application/json" \
+  -d '{"request_id":"<request_id_here>"}'
+```
+
+### 16.9 Python streaming client example
+
+```python
+import json
+import requests
+
+payload = {
+    "hoster": "openrouter",
+    "model": "openai/gpt-4o-mini",
+    "user_prompt": "Tell me a short story",
+}
+
+with requests.post("http://localhost:8129/chat", json=payload, stream=True, timeout=120) as r:
+    r.raise_for_status()
+    for line in r.iter_lines(decode_unicode=True):
+        if not line:
+            continue
+        evt = json.loads(line)
+        if evt.get("event") == "content":
+            print(evt["content"], end="", flush=True)
+        elif evt.get("event") == "tool_calls":
+            print("\n[tool_calls]", evt["tool_calls"])
+        elif evt.get("status") == "start":
+            print("\nrequest_id:", evt["request_id"])
+        elif evt.get("status") in ("end", "cancelled"):
+            print("\nstatus:", evt["status"])
+            break
+        elif evt.get("error"):
+            print("\nerror:", evt["error"])
+            break
+```
+
+### 16.10 Search Pexels photos through C05
+
+```bash
+curl -X POST http://localhost:8129/hosters/pexels/api/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "search_photos",
+    "params": {
+      "query": "northern lights",
+      "orientation": "landscape",
+      "per_page": 3
+    }
+  }'
+```
+
+### 16.11 Download a Pexels asset through C05
+
+Use an `asset_url` returned in `download_options` or `default_download`.
+
+```bash
+curl -L -X POST http://localhost:8129/hosters/pexels/api/download \
+  -H "Content-Type: application/json" \
+  -d '{
+    "asset_url": "https://images.pexels.com/photos/3573351/pexels-photo-3573351.png"
+  }' \
+  -o pexels-photo.png
+```
+
+### 16.12 Search NewsAPI headlines through C05
+
+```bash
+curl -X POST http://localhost:8129/hosters/newsapi/api/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "top_headlines",
+    "params": {
+      "country": "us",
+      "category": "technology",
+      "pageSize": 5
+    }
+  }'
+```
+
+### 16.13 Search Unsplash photos through C05
+
+```bash
+curl -X POST http://localhost:8129/hosters/unsplash/api/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "search_photos",
+    "params": {
+      "query": "city skyline",
+      "per_page": 3
+    }
+  }'
+```
+
+### 16.14 Search Pixabay images through C05
+
+```bash
+curl -X POST http://localhost:8129/hosters/pixabay/api/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "search_images",
+    "params": {
+      "q": "forest trail",
+      "per_page": 3,
+      "safesearch": true
+    }
+  }'
+```
+
+## 17. Limitations and Caveats
+
+- No built-in authentication/authorization layer on API endpoints.
+- Recent request records (`/requests/most_recent`) are in-memory only (lost on restart).
+- Session files are local JSON files; no DB backend.
+- `--ekau` flag is currently a no-op.
+- Gemini hoster currently does not forward tool definitions/tool_choice.
+- Gemini bridge is text-oriented; not a full multimodal bridge yet.
+- `pexels` is exposed as a curated provider bridge, not a general arbitrary HTTP proxy.
+- `newsapi`, `unsplash`, and `pixabay` are also exposed as curated provider bridges, not arbitrary HTTP proxies.
+- Pexels API usage still requires client-side attribution/linking that complies with Pexels terms.
+- Unsplash image usage should preserve Unsplash attribution and reporting requirements, including using the returned Unsplash image URLs and download-tracking links.
+- Model catalog responses depend on external provider APIs and key permissions.
+- `/models` can return mixed results if some providers fail (errors are returned per hoster).
+
+## 18. Error Behavior Reference
+
+Common patterns:
+
+- `400 Unknown hoster 'x'`
+- `400 Field 'model' must be provided and non-empty.`
+- `400 Hoster '<provider>' does not support chat completions.`
+- `500 No usable <hoster> API keys configured.`
+- Streamed model errors:
+  - `Model '<name>' appears invalid or not found: ...`
+- Streamed exhaustion errors:
+  - `All keys failed or were exhausted.`
+
+## 19. Observability and Debugging
+
+Enable debug logs:
+
+```bash
+python main.py --debug
+```
+
+Equivalent env variable:
+
+```bash
+export C04POE_DEBUG=1
+```
+
+Debug mode logs include keyring state transitions and cleanup behavior.
+
+## 20. Security and Operational Recommendations
+
+- Keep API keys only in local key files or environment-managed secrets.
+- Restrict server exposure behind your own gateway/auth if used beyond localhost.
+- Rotate keys periodically and monitor `KeysUsedUp.txt` growth.
+- For high-throughput usage, consider:
+  - external cache for model lists
+  - DB-backed session storage
+  - request authentication and rate limiting at ingress
+
+## 21. Quick Checklist
+
+- Keys configured in `keys/*.txt`
+- Required SDKs installed (`google-genai` for Gemini)
+- Server running on expected port
+- Client parses NDJSON line-by-line
+- Provider-native clients use `/hosters/{hoster}/operations` and `/hosters/{hoster}/api/request` when the hoster is not chat-based
+- `request_id` captured for cancellation support
+- `include_history` configured to match your persistence intent

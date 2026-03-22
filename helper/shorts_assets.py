@@ -1,0 +1,341 @@
+import logging
+import os
+import random
+import subprocess
+
+from moviepy import (
+    AudioFileClip,
+    CompositeAudioClip,
+    VideoFileClip,
+    concatenate_audioclips,
+    concatenate_videoclips,
+)
+
+logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+DEFAULT_MUSIC_DIR = os.getenv("SHORTS_MUSIC_DIR", os.path.join(PROJECT_ROOT, "Music"))
+DEFAULT_BRAINROT_DIR = os.getenv(
+    "SHORTS_BRAINROT_DIR",
+    os.path.join(PROJECT_ROOT, "AttentionGrabBrainRotVideos"),
+)
+DEFAULT_GREENSCREEN_DIR = os.getenv(
+    "SHORTS_GREENSCREEN_DIR",
+    os.path.join(PROJECT_ROOT, "GreenScreenAnimeGirls"),
+)
+
+AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
+VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv")
+
+
+def get_default_font_path():
+    candidates = [
+        os.path.join(PROJECT_ROOT, "packages", "fonts", "default_font.ttf"),
+        os.path.join(PROJECT_ROOT, "helper", "fonts", "default_font.ttf"),
+    ]
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+def _list_media_files(directory, extensions):
+    if not directory or not os.path.isdir(directory):
+        return []
+
+    files = []
+    for entry in os.listdir(directory):
+        path = os.path.join(directory, entry)
+        if os.path.isfile(path) and entry.lower().endswith(extensions):
+            files.append(path)
+    return sorted(files)
+
+
+def pick_random_background_music(music_dir=None):
+    music_files = _list_media_files(music_dir or DEFAULT_MUSIC_DIR, AUDIO_EXTENSIONS)
+    if not music_files:
+        logger.warning("No background music files found in %s", music_dir or DEFAULT_MUSIC_DIR)
+        return None
+
+    selected = random.choice(music_files)
+    logger.info("Selected background music: %s", os.path.basename(selected))
+    return selected
+
+
+def pick_random_brainrot_video(brainrot_dir=None):
+    video_files = _list_media_files(brainrot_dir or DEFAULT_BRAINROT_DIR, VIDEO_EXTENSIONS)
+    if not video_files:
+        logger.warning("No brainrot overlay videos found in %s", brainrot_dir or DEFAULT_BRAINROT_DIR)
+        return None
+
+    selected = random.choice(video_files)
+    logger.info("Selected brainrot overlay video: %s", os.path.basename(selected))
+    return selected
+
+
+def pick_random_greenscreen_video(greenscreen_dir=None):
+    video_files = _list_media_files(greenscreen_dir or DEFAULT_GREENSCREEN_DIR, VIDEO_EXTENSIONS)
+    if not video_files:
+        logger.warning("No green-screen anime videos found in %s", greenscreen_dir or DEFAULT_GREENSCREEN_DIR)
+        return None
+
+    # SystemRandom avoids any accidental deterministic seeding from elsewhere.
+    selected = random.SystemRandom().choice(video_files)
+    logger.info(
+        "Selected green-screen anime video (%s candidates): %s",
+        len(video_files),
+        os.path.basename(selected),
+    )
+    return selected
+
+
+def pick_random_brainrot_start_time(video_path, min_remaining_seconds=60.0):
+    """
+    Pick a random start time while guaranteeing at least min_remaining_seconds remain.
+    If the source video is too short, returns 0.0.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return 0.0
+
+    source_video = None
+    try:
+        source_video = VideoFileClip(video_path).without_audio()
+        duration = float(source_video.duration or 0.0)
+        max_start = duration - float(min_remaining_seconds)
+        if max_start <= 0:
+            return 0.0
+        return random.uniform(0.0, max_start)
+    except Exception as exc:
+        logger.warning("Failed to compute random brainrot start time for %s: %s", video_path, exc)
+        return 0.0
+    finally:
+        try:
+            if source_video:
+                source_video.close()
+        except Exception:
+            pass
+
+
+def _build_looped_audio_clip(audio_path, duration):
+    if not audio_path or duration <= 0:
+        return None
+
+    source_audio = AudioFileClip(audio_path)
+    if source_audio.duration <= 0:
+        source_audio.close()
+        return None
+
+    remaining = duration
+    audio_segments = []
+
+    if source_audio.duration > duration:
+        max_start = max(0, source_audio.duration - duration)
+        start_time = random.uniform(0, max_start) if max_start > 0 else 0
+        clip = source_audio.subclipped(start_time, start_time + duration).with_duration(duration)
+        clip._source_audio = source_audio
+        return clip
+
+    while remaining > 0.01:
+        segment_duration = min(remaining, source_audio.duration)
+        audio_segments.append(source_audio.subclipped(0, segment_duration))
+        remaining -= segment_duration
+
+    looped_audio = (
+        audio_segments[0]
+        if len(audio_segments) == 1
+        else concatenate_audioclips(audio_segments)
+    ).with_duration(duration)
+    looped_audio._source_audio = source_audio
+    return looped_audio
+
+
+def add_background_music_to_video(video_path, music_dir=None, volume_scale=None, fps=30, preset="ultrafast"):
+    if not video_path or not os.path.exists(video_path):
+        return video_path
+
+    music_path = pick_random_background_music(music_dir)
+    if not music_path:
+        return video_path
+
+    volume_scale = (
+        float(os.getenv("SHORTS_MUSIC_VOLUME", "0.08"))
+        if volume_scale is None
+        else volume_scale
+    )
+
+    # Apply a small global boost to background music per user request (+5%)
+    try:
+        volume_scale = float(volume_scale) * 1.05
+    except Exception:
+        # If casting fails, leave as-is
+        pass
+
+    video_clip = None
+    music_clip = None
+    mixed_audio = None
+    final_video = None
+    temp_output = video_path.replace(".mp4", "_with_music.mp4")
+
+    try:
+        video_clip = VideoFileClip(video_path)
+        music_clip = _build_looped_audio_clip(music_path, video_clip.duration)
+        if not music_clip:
+            return video_path
+
+        music_clip = music_clip.with_volume_scaled(volume_scale)
+        audio_layers = []
+        if video_clip.audio:
+            audio_layers.append(video_clip.audio)
+        audio_layers.append(music_clip)
+
+        mixed_audio = CompositeAudioClip(audio_layers)
+        final_video = video_clip.with_audio(mixed_audio)
+        final_video.write_videofile(
+            temp_output,
+            fps=fps,
+            codec="libx264",
+            audio_codec="aac",
+            preset=preset,
+            logger=None,
+        )
+        os.replace(temp_output, video_path)
+        logger.info("Added background music to video using %s", os.path.basename(music_path))
+        return video_path
+    except Exception as exc:
+        logger.error("Failed to add background music: %s", exc)
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+        return video_path
+    finally:
+        for clip in (final_video, mixed_audio, music_clip, video_clip):
+            try:
+                if clip:
+                    clip.close()
+            except Exception:
+                pass
+
+
+def add_anime_greenscreen_overlay_to_video(
+    video_path,
+    greenscreen_dir=None,
+    scale_factor=0.5,
+    chroma_similarity=None,
+    chroma_blend=None,
+    preset="ultrafast",
+):
+    """
+    Overlay a random green-screen anime clip on bottom-left of the final video.
+    The overlay is scaled to 1/4 of the base frame area (half width, half height).
+    """
+    if not video_path or not os.path.exists(video_path):
+        return video_path
+
+    overlay_video_path = pick_random_greenscreen_video(greenscreen_dir)
+    if not overlay_video_path:
+        return video_path
+
+    chroma_similarity = (
+        float(os.getenv("SHORTS_GREENSCREEN_CHROMA_SIMILARITY", "0.24"))
+        if chroma_similarity is None
+        else float(chroma_similarity)
+    )
+    chroma_blend = (
+        float(os.getenv("SHORTS_GREENSCREEN_CHROMA_BLEND", "0.10"))
+        if chroma_blend is None
+        else float(chroma_blend)
+    )
+
+    temp_output = video_path.replace('.mp4', '_with_anime_overlay.mp4')
+
+    filter_complex = (
+        f"[1:v][0:v]scale2ref=w=main_w*{float(scale_factor):.4f}:h=main_h*{float(scale_factor):.4f}[anime_s][base];"
+        f"[anime_s]chromakey=0x00FF00:{chroma_similarity:.4f}:{chroma_blend:.4f}[anime];"
+        f"[base][anime]overlay=0:main_h-overlay_h:shortest=1[outv]"
+    )
+
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+        '-i', video_path,
+        '-stream_loop', '-1', '-i', overlay_video_path,
+        '-filter_complex', filter_complex,
+        '-map', '[outv]',
+        '-map', '0:a?',
+        '-c:v', 'libx264',
+        '-preset', preset,
+        '-crf', '20',
+        '-c:a', 'aac',
+        '-shortest',
+        temp_output,
+    ]
+
+    try:
+        subprocess.run(cmd, check=True)
+        os.replace(temp_output, video_path)
+        logger.info(
+            "Added green-screen anime overlay using %s",
+            os.path.basename(overlay_video_path),
+        )
+        return video_path
+    except Exception as exc:
+        logger.error("Failed to add green-screen anime overlay: %s", exc)
+        try:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+        except Exception:
+            pass
+        return video_path
+
+
+def build_brainrot_overlay_clip(
+    video_path,
+    start_time,
+    duration,
+    canvas_size=(1080, 1920),
+    top_height_ratio=0.5,
+):
+    if not video_path or duration <= 0:
+        return None
+
+    source_video = VideoFileClip(video_path).without_audio()
+    if source_video.duration <= 0:
+        source_video.close()
+        return None
+
+    cursor = start_time % source_video.duration
+    remaining = duration
+    video_segments = []
+
+    while remaining > 0.01:
+        available = source_video.duration - cursor
+        segment_duration = min(remaining, available)
+        video_segments.append(source_video.subclipped(cursor, cursor + segment_duration))
+        remaining -= segment_duration
+        cursor = 0
+
+    overlay_clip = (
+        video_segments[0]
+        if len(video_segments) == 1
+        else concatenate_videoclips(video_segments, method="compose")
+    ).with_duration(duration)
+
+    target_width = canvas_size[0]
+    target_height = int(canvas_size[1] * top_height_ratio)
+
+    if overlay_clip.w / overlay_clip.h < target_width / target_height:
+        overlay_clip = overlay_clip.resized(width=target_width)
+    else:
+        overlay_clip = overlay_clip.resized(height=target_height)
+
+    crop_x = max(0, int((overlay_clip.w - target_width) / 2))
+    crop_y = max(0, int((overlay_clip.h - target_height) / 2))
+    overlay_clip = overlay_clip.cropped(
+        x1=crop_x,
+        y1=crop_y,
+        x2=crop_x + target_width,
+        y2=crop_y + target_height,
+    )
+    overlay_clip = overlay_clip.with_position(("center", 0)).with_duration(duration)
+    overlay_clip._source_video = source_video
+    return overlay_clip

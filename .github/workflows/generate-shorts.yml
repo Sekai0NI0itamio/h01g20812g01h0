@@ -1,0 +1,113 @@
+name: Generate YouTube Shorts Batch
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_count:
+        description: Number of shorts to generate (no maximum)
+        required: true
+        default: "10"
+      topic_direction:
+        description: Optional broad direction for AI-generated topics
+        required: false
+        default: ""
+      creator_mode:
+        description: Rendering mode
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - video
+          - image
+      upload_to_youtube:
+        description: Upload generated videos to YouTube
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  generate-shorts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    env:
+      PYTHONUNBUFFERED: "1"
+      USE_C05_LOCAL_KEYS: "false"
+      ENABLE_YOUTUBE_UPLOAD: ${{ inputs.upload_to_youtube }}
+
+      SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
+      SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
+      SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
+
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_IMAGE_MODEL: ${{ secrets.OPENROUTER_IMAGE_MODEL }}
+      OPENROUTER_IMAGE_SIZE: ${{ secrets.OPENROUTER_IMAGE_SIZE }}
+      OPENROUTER_SITE_URL: ${{ secrets.OPENROUTER_SITE_URL }}
+      OPENROUTER_APP_NAME: ${{ secrets.OPENROUTER_APP_NAME }}
+
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      UNSPLASH_API_KEY: ${{ secrets.UNSPLASH_API_KEY }}
+
+      USE_FREEVOICEREADER_TTS: "true"
+      FREEVOICEREADER_TTS_VOICE: ${{ secrets.FREEVOICEREADER_TTS_VOICE }}
+      FREEVOICEREADER_TTS_TIMEOUT: ${{ secrets.FREEVOICEREADER_TTS_TIMEOUT }}
+
+      SHORTS_MUSIC_DIR: Music
+      SHORTS_BRAINROT_DIR: AttentionGrabBrainRotVideos
+      SHORTS_GREENSCREEN_DIR: GreenScreenAnimeGirls
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare optional YouTube credentials
+        if: ${{ inputs.upload_to_youtube }}
+        env:
+          YOUTUBE_CLIENT_SECRET_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}
+          YOUTUBE_TOKEN_PICKLE_B64: ${{ secrets.YOUTUBE_TOKEN_PICKLE_B64 }}
+        run: |
+          set -e
+          mkdir -p automation/credentials
+
+          if [ -n "$YOUTUBE_CLIENT_SECRET_JSON" ]; then
+            printf '%s' "$YOUTUBE_CLIENT_SECRET_JSON" > automation/credentials/client_secret.json
+            echo "YOUTUBE_CLIENT_SECRET_PATH=$GITHUB_WORKSPACE/automation/credentials/client_secret.json" >> "$GITHUB_ENV"
+          fi
+
+          if [ -n "$YOUTUBE_TOKEN_PICKLE_B64" ]; then
+            printf '%s' "$YOUTUBE_TOKEN_PICKLE_B64" | base64 --decode > automation/credentials/token.pickle
+            echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.pickle" >> "$GITHUB_ENV"
+          fi
+
+      - name: Generate shorts sequentially
+        run: |
+          python automation/workflow_batch_runner.py \
+            --count "${{ inputs.video_count }}" \
+            --topic-direction "${{ inputs.topic_direction }}" \
+            --creator "${{ inputs.creator_mode }}" \
+            --upload-to-youtube "${{ inputs.upload_to_youtube }}" \
+            --artifacts-dir "workflow_artifacts"
+
+      - name: Upload generated artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-shorts-${{ github.run_id }}
+          path: workflow_artifacts
+          if-no-files-found: error

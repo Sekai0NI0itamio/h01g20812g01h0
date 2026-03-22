@@ -1,0 +1,27 @@
+# Credentials
+credentials/
+
+# Environment variables
+.env
+
+# Virtual environment
+.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Output directories
+ai_shorts_output/
+logs/
+temp/
+
+# Large binary files
+ffmpeg/
+
+# IDE files
+.vscode/
+
+lazycreator-1.json
+cron.log

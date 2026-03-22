@@ -1,0 +1,246 @@
+# KeyGetManual
+
+Version: 1.2  
+For: App developers integrating with C05 Local AI
+
+## 1. Purpose
+
+`RequestApiKey` lets your app ask C05 Local AI for an API key for a specific hoster.
+
+Use this when your app wants to:
+- quickly fetch a working key
+- auto-configure an SDK client
+- avoid hardcoding provider keys in multiple places
+- retrieve non-chat provider keys too, such as `pexels`, `newsapi`, `unsplash`, and `pixabay`
+
+## 2. Endpoint
+
+- Method: `POST`
+- Path: `/RequestApiKey`
+- Content-Type: `application/json`
+
+Example local URL:
+- `http://127.0.0.1:8129/RequestApiKey`
+
+## 3. Request Body
+
+```json
+{
+  "hoster": "pexels",
+  "require_usable": true,
+  "allow_fallback_to_any": false,
+  "mask_key": false,
+  "exclude_keys": []
+}
+```
+
+Fields:
+- `hoster` (string, optional): provider name (`poe`, `openrouter`, `googlegemini`, `nvidia`, `huggingface`, `groq`, `scitely`, `pexels`, `newsapi`, `unsplash`, `pixabay`).  
+  If omitted, C05 default hoster is used.
+- `require_usable` (bool, default `true`): only return keys currently marked usable.
+- `allow_fallback_to_any` (bool, default `false`): if no usable key is found, return first configured key.
+- `mask_key` (bool, default `false`): return masked key value instead of full key.
+- `exclude_keys` (string array, optional): keys the caller wants C05 to skip.
+  - full key match: `"sk-abc123...full..."`
+  - prefix match with ellipsis: `"sk-abc123..."`
+
+Important:
+- Fallback is only used when `require_usable` is `false` and `allow_fallback_to_any` is `true`.
+- Exclusions are applied to both usable-key selection and fallback-key selection.
+
+## 4. Success Response
+
+```json
+{
+  "hoster": "pexels",
+  "key": "PEXELS_xxxxxxxx",
+  "selection": "usable",
+  "require_usable": true,
+  "allow_fallback_to_any": false,
+  "excluded_keys_count": 1,
+  "usable_keys": 1,
+  "configured_keys": 1,
+  "fetched_at_utc": "2026-03-07T00:00:00+00:00"
+}
+```
+
+`selection` values:
+- `usable`: returned from usable key pool
+- `configured_fallback`: returned from configured keys fallback
+
+## 5. Error Response
+
+`400`:
+- unknown hoster
+
+`503`:
+- no key available under your request options
+
+Example:
+
+```json
+{
+  "detail": "No usable API key available for hoster 'pexels'. Configure more keys, relax request options, or adjust exclusions."
+}
+```
+
+## 6. Quick Examples
+
+### curl
+
+```bash
+curl -X POST http://127.0.0.1:8129/RequestApiKey \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hoster": "pexels",
+    "require_usable": true,
+    "exclude_keys": ["PEXELS_abcd..."]
+  }'
+```
+
+### JavaScript
+
+```javascript
+const res = await fetch("http://127.0.0.1:8129/RequestApiKey", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    hoster: "pexels",
+    require_usable: true,
+    exclude_keys: ["PEXELS_abcd..."]
+  })
+});
+
+const data = await res.json();
+if (!res.ok) throw new Error(data.detail || "RequestApiKey failed");
+const apiKey = data.key;
+```
+
+### Python
+
+```python
+import requests
+
+resp = requests.post(
+    "http://127.0.0.1:8129/RequestApiKey",
+    json={
+        "hoster": "pexels",
+        "require_usable": True,
+        "exclude_keys": ["PEXELS_abcd..."],
+    },
+    timeout=10,
+)
+resp.raise_for_status()
+api_key = resp.json()["key"]
+print(api_key)
+```
+
+## 7. Provider Notes
+
+### 7.1 Pexels workflow
+
+Typical flow for the new `pexels` hoster:
+- ask C05 for a `pexels` key if your app wants to call the upstream Pexels SDK directly
+- or keep the key inside C05 and call:
+  - `GET /hosters/pexels/operations`
+  - `POST /hosters/pexels/api/request`
+  - `POST /hosters/pexels/api/download`
+
+Example local provider request through C05:
+
+```bash
+curl -X POST http://127.0.0.1:8129/hosters/pexels/api/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "search_photos",
+    "params": {
+      "query": "mountains",
+      "per_page": 3
+    }
+  }'
+```
+
+### 7.2 NewsAPI workflow
+
+- `newsapi` uses a single API key.
+- Typical provider operations:
+  - `top_headlines`
+  - `everything`
+  - `sources`
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:8129/hosters/newsapi/api/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "top_headlines",
+    "params": {
+      "country": "us",
+      "category": "technology",
+      "pageSize": 5
+    }
+  }'
+```
+
+### 7.3 Unsplash workflow
+
+- `unsplash.txt` is parsed as account bundles, not one-line-per-key.
+- Each account is read as:
+  - `Application ID <value>`
+  - `Access Key <value>`
+  - `Secret Key <value>`
+- C05 rotates Unsplash accounts by the `Access Key`, because that is the credential used for public API requests.
+- `RequestApiKey` returns the Access Key for `unsplash`.
+- Typical provider operations:
+  - `list_photos`
+  - `search_photos`
+  - `get_photo`
+  - `random_photo`
+  - `track_photo_download`
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:8129/hosters/unsplash/api/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "search_photos",
+    "params": {
+      "query": "city skyline",
+      "per_page": 3
+    }
+  }'
+```
+
+### 7.4 Pixabay workflow
+
+- `pixabay` uses a single API key.
+- Typical provider operations:
+  - `search_images`
+  - `get_image`
+  - `search_videos`
+  - `get_video`
+- Media URLs returned by Pixabay can be proxied through:
+  - `POST /hosters/pixabay/api/download`
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:8129/hosters/pixabay/api/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "search_images",
+    "params": {
+      "q": "forest",
+      "per_page": 3,
+      "safesearch": true
+    }
+  }'
+```
+
+## 8. Security Notes
+
+- This endpoint can return real provider keys.
+- Restrict access to your local C05 server.
+- Do not expose this endpoint publicly without authentication and network controls.

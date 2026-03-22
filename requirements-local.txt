@@ -1,0 +1,11 @@
+python-dotenv==1.0.1
+requests==2.32.4
+numpy==2.2.3
+Pillow==10.4.0
+moviepy==2.1.2
+imageio==2.37.0
+imageio-ffmpeg==0.6.0
+gTTS==2.5.4
+nltk==3.9.1
+psutil==6.1.1
+tqdm==4.67.1

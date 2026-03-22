@@ -1,0 +1,20 @@
+AI shorts script template
+
+Use this house style for the spoken script:
+
+- No intro line.
+- No presenter setup.
+- No greeting.
+- Start immediately with a concrete fact, surprising claim, or hard-hitting observation.
+- Keep the pacing fast and factual.
+- Use short, direct sentences.
+- Do not mention the channel name or the video title inside the script.
+- Do not end with a summary, conclusion, or sign-off.
+- End with exactly one call-to-action sentence.
+- The final sentence must begin with "Like and subscribe if..."
+- Tailor the CTA to the topic when possible.
+
+Acceptable CTA examples:
+- Like and subscribe if you find this useful.
+- Like and subscribe if you think OpenAI will beat Claude.
+- Like and subscribe if you want more AI facts like this.
