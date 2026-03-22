@@ -304,7 +304,7 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                 output_path=thumbnail_output_path
             )
 
-            # If OpenRouter image generation fails, use Unsplash with our query
+            # If thumbnail generation fails, try direct stock fetch with our query
             if not thumbnail_path:
                 logger.info(f"Attempting with Unsplash query: {thumbnail_unsplash_query}")
                 thumbnail_path = thumbnail_generator.fetch_image_unsplash(thumbnail_unsplash_query)
