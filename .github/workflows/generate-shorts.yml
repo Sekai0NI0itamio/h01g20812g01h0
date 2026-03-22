@@ -99,7 +99,7 @@ jobs:
 
       - name: Generate shorts sequentially
         run: |
-          python automation/workflow_batch_runner.py \
+          python -m automation.workflow_batch_runner \
             --count "${{ inputs.video_count }}" \
             --topic-direction "${{ inputs.topic_direction }}" \
             --creator "${{ inputs.creator_mode }}" \
