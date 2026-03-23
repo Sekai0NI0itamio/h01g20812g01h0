@@ -613,7 +613,7 @@ class YTShortsCreator_I:
                 output_path = add_dynamic_auto_captions_to_video(
                     output_path,
                     script_sections=script_sections,
-                    font_size=16,
+                    font_size=50,
                     position_ratio=0.5,
                     preset="ultrafast",
                 )

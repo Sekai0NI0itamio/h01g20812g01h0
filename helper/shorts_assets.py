@@ -395,7 +395,7 @@ def _get_gpt_caption_colors(script_sections):
 def add_dynamic_auto_captions_to_video(
     video_path,
     script_sections,
-    font_size=16,
+    font_size=50,
     position_ratio=0.5,
     preset="ultrafast",
 ):
