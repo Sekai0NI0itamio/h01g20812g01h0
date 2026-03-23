@@ -85,7 +85,8 @@ REDDIT_REWRITE_SYSTEM_PROMPT = (
     "that captures the emotional arc (confusion, embarrassment, realization, etc.) as it unfolded in real time. "
     "Use plain everyday words only and avoid literary or poetic descriptors. "
     "Minor grammar imperfections are acceptable if the flow feels natural. "
-    "Keep it as one paragraph, but use short clear sentences with periods so it does not turn into one giant run-on."
+    "Keep it as one paragraph, but use short clear sentences with periods so it does not turn into one giant run-on. "
+    "Do not compress the source into a teaser. Preserve nearly all meaningful beats and keep similar narrative density."
 )
 
 REDDIT_REWRITE_USER_TEMPLATE = (
@@ -95,6 +96,7 @@ REDDIT_REWRITE_USER_TEMPLATE = (
     "Use simple non-literary wording and keep it fluid even if grammar is not perfect.\n"
     "Keep it as one paragraph, but break the narration into short, clear sentences with periods.\n"
     "Avoid giant run-on sentences.\n"
+    "Do not drastically shorten the story or reduce it to a summary.\n"
     "End with a call for comments, like: Comment what you think about this down in the comments.\n"
     "Return exactly one paragraph (no lists or line breaks)."
 )
@@ -538,6 +540,30 @@ def _load_script_template():
         return ""
 
 
+def _count_words(text):
+    return len(re.findall(r"\b[\w'-]+\b", str(text or "")))
+
+
+def _get_story_package_paragraph_bounds(source_word_count, paragraph_only=False):
+    source_word_count = max(0, int(source_word_count or 0))
+    if paragraph_only:
+        min_words = min(180, max(90, int(source_word_count * 0.40)))
+        max_words = max(min_words + 30, min(320, max(140, int(source_word_count * 0.75))))
+    else:
+        min_words = min(160, max(80, int(source_word_count * 0.30)))
+        max_words = max(min_words + 30, min(280, max(130, int(source_word_count * 0.60))))
+    return min_words, max_words
+
+
+def _should_skip_story_rewrite(story_body):
+    threshold_raw = str(os.getenv("SHORTS_STORY_REWRITE_SKIP_WORD_THRESHOLD", "240")).strip()
+    try:
+        threshold = max(0, int(threshold_raw))
+    except ValueError:
+        threshold = 240
+    return _count_words(story_body) >= threshold
+
+
 def _has_structured_ai_provider():
     return bool(get_scitely_api_key() or get_nvidia_api_key())
 
@@ -719,7 +745,15 @@ def _rewrite_story_to_immersive_first_person(story_text, model):
     return str(rewritten or "").strip()
 
 
-def _build_story_content_package_prompt(topic, rewritten_story, source_title="", source_link="", paragraph_only=False):
+def _build_story_content_package_prompt(
+    topic,
+    rewritten_story,
+    source_title="",
+    source_link="",
+    paragraph_only=False,
+    paragraph_word_bounds=None,
+):
+    min_words, max_words = paragraph_word_bounds or (120, 220)
     if paragraph_only:
         return f"""
     You are creating a complete YouTube Short content package from a rewritten first-person story.
@@ -745,6 +779,8 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
     - paragraph may include minor grammar imperfections if it sounds natural.
     - paragraph must stay as one paragraph, but it should use short clear sentences with periods.
     - paragraph must not feel like one giant run-on sentence.
+    - paragraph must preserve the full incident arc instead of collapsing into a teaser summary.
+    - paragraph should target {min_words}-{max_words} words.
     - paragraph should end with a comment CTA line such as "Comment what you think about this down in the comments."
     - do not include labels, bullet points, timestamps, or a separate line-by-line script.
     - title should be 40-60 characters and click-worthy.
@@ -778,6 +814,8 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
     - paragraph may include minor grammar imperfections if it sounds natural.
     - paragraph must stay as one paragraph, but it should use short clear sentences with periods.
     - paragraph must not feel like one giant run-on sentence.
+    - paragraph must preserve the full incident arc instead of collapsing into a teaser summary.
+    - paragraph should target {min_words}-{max_words} words.
     - paragraph should end with a comment CTA line such as "Comment what you think about this down in the comments."
     - script must be derived from the paragraph (break the paragraph into concise caption-sized beats).
     - script should be 8 to 16 lines, one caption/beat per line, each 4-12 words.
@@ -804,9 +842,19 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries, 
     if not story_body:
         return None
 
+    source_word_count = _count_words(story_body)
+    paragraph_word_bounds = _get_story_package_paragraph_bounds(source_word_count, paragraph_only=paragraph_only)
+
     for attempt in range(retries):
         try:
-            rewritten_story = _rewrite_story_to_immersive_first_person(story_body, model)
+            if _should_skip_story_rewrite(story_body):
+                rewritten_story = story_body
+                logger.info(
+                    "Skipping story rewrite for long input (%s words) to preserve narrative length.",
+                    source_word_count,
+                )
+            else:
+                rewritten_story = _rewrite_story_to_immersive_first_person(story_body, model)
             if not rewritten_story:
                 raise ValueError("Rewritten story was empty")
 
@@ -816,6 +864,7 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries, 
                 source_title=source_title,
                 source_link=source_link,
                 paragraph_only=paragraph_only,
+                paragraph_word_bounds=paragraph_word_bounds,
             )
             response_content = _create_json_completion(
                 prompt=package_prompt,
@@ -835,6 +884,12 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries, 
             # Ensure paragraph is a single paragraph and strip unnecessary whitespace
             paragraph = _normalize_paragraph_narration_style(content_package.get("paragraph", ""))
             content_package["paragraph"] = paragraph
+            paragraph_word_count = _count_words(paragraph)
+            min_words, max_words = paragraph_word_bounds
+            if paragraph_word_count < min_words or paragraph_word_count > max_words:
+                raise ValueError(
+                    f"Paragraph word count {paragraph_word_count} outside target range {min_words}-{max_words}."
+                )
 
             if paragraph_only:
                 content_package["script"] = paragraph

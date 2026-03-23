@@ -192,23 +192,36 @@ def _try_moviepy_concatenation(
             clips_with_idx = [(getattr(clip, '_section_idx', i), clip) for i, clip in enumerate(clips)]
             clips_with_idx.sort(key=lambda x: x[0])
             clips = [clip for _, clip in clips_with_idx]
-        
+
+        clips_have_audio = any(getattr(clip, "audio", None) is not None for clip in clips)
+
         # Try method 1: Direct crossfade
         if crossfade_duration > 0:
-            try:
-                success, result = _try_direct_crossfade(clips, output_file, crossfade_duration, preset)
-                if success:
-                    return success, result
-            except Exception as e:
-                logger.warning(f"Direct crossfade failed: {e}, trying method 2")
-                
-            # Try method 2: Manual fades
-            try:
-                success, result = _try_manual_fades(clips, output_file, crossfade_duration, preset)
-                if success:
-                    return success, result
-            except Exception as e:
-                logger.warning(f"Manual fades failed: {e}, trying simple concatenation")
+            if clips_have_audio:
+                logger.info(
+                    "Clips contain audio; skipping overlap crossfade so total narration length is preserved."
+                )
+                try:
+                    success, result = _try_manual_fades(clips, output_file, crossfade_duration, preset)
+                    if success:
+                        return success, result
+                except Exception as e:
+                    logger.warning(f"Manual fades failed: {e}, trying simple concatenation")
+            else:
+                try:
+                    success, result = _try_direct_crossfade(clips, output_file, crossfade_duration, preset)
+                    if success:
+                        return success, result
+                except Exception as e:
+                    logger.warning(f"Direct crossfade failed: {e}, trying method 2")
+
+                # Try method 2: Manual fades
+                try:
+                    success, result = _try_manual_fades(clips, output_file, crossfade_duration, preset)
+                    if success:
+                        return success, result
+                except Exception as e:
+                    logger.warning(f"Manual fades failed: {e}, trying simple concatenation")
         
         # Try method 3: Simple concatenation
         try:
