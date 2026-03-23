@@ -3,7 +3,6 @@ import time
 import re
 import json
 import math
-import os
 from pathlib import Path
 
 from automation.scitely_client import (
@@ -15,11 +14,6 @@ from automation.scitely_client import (
     get_scitely_api_key,
     get_scitely_model,
 )
-
-try:
-    from automation.reddit_story_fetcher import fetch_random_story_sync
-except Exception:
-    fetch_random_story_sync = None
 
 # Configure logging - don't use basicConfig since main.py handles this
 logger = logging.getLogger(__name__)
@@ -197,27 +191,6 @@ def _create_text_completion(messages, model, max_tokens, temperature):
     return _extract_completion_content(response)
 
 
-def _fetch_source_story_from_reddit():
-    if fetch_random_story_sync is None:
-        logger.warning("Reddit story fetcher module is unavailable; using topic-based generation")
-        return None
-
-    try:
-        story = fetch_random_story_sync()
-        if not story:
-            logger.warning("Reddit story fetcher returned no story data")
-            return None
-        body = str(story.get("body", "")).strip()
-        if not body:
-            logger.warning("Fetched Reddit story has empty body text")
-            return None
-        logger.info("Fetched Reddit story: %s", story.get("permalink", "unknown link"))
-        return story
-    except Exception as exc:
-        logger.warning("Reddit story fetch failed: %s", exc)
-        return None
-
-
 def _rewrite_story_to_immersive_first_person(story_text, model):
     messages = [
         {"role": "system", "content": REDDIT_REWRITE_SYSTEM_PROMPT},
@@ -264,9 +237,17 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
 
 
 def _build_content_package_from_story(topic, story, model, max_tokens, retries):
-    story_body = str(story.get("body", "")).strip()
-    source_title = str(story.get("title", "")).strip()
-    source_link = str(story.get("permalink", "")).strip()
+    if isinstance(story, dict):
+        story_body = str(story.get("body", "")).strip()
+        source_title = str(story.get("title", "")).strip()
+        source_link = str(story.get("permalink", "")).strip()
+    else:
+        story_body = str(story or "").strip()
+        source_title = ""
+        source_link = ""
+
+    if not story_body:
+        return None
 
     for attempt in range(retries):
         try:
@@ -879,7 +860,7 @@ def generate_meme_insertion_plan(
 
     return []
 
-def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3):
+def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3, source_story_text=None):
     """
     Generate a comprehensive content package for a YouTube Short in a single API call.
 
@@ -905,21 +886,19 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3)
     if is_scitely_disabled():
         logger.info("Scitely is disabled; comprehensive content generation will use NVIDIA")
 
-    story_source_mode = os.getenv("SHORTS_SCRIPT_SOURCE", "reddit").strip().lower()
-    if story_source_mode in {"reddit", "auto"}:
-        story = _fetch_source_story_from_reddit()
-        if story:
-            package = _build_content_package_from_story(
-                topic=topic,
-                story=story,
-                model=model,
-                max_tokens=max_tokens,
-                retries=retries,
-            )
-            if package:
-                return package
-        else:
-            logger.info("No Reddit story available; falling back to topic-based generation")
+    user_story_text = str(source_story_text or "").strip()
+    if user_story_text:
+        logger.info("Using user-provided story input for script generation")
+        package = _build_content_package_from_story(
+            topic=topic,
+            story={"body": user_story_text},
+            model=model,
+            max_tokens=max_tokens,
+            retries=retries,
+        )
+        if package:
+            return package
+        logger.warning("User-provided story generation failed; falling back to topic-based generation")
 
     # Current date for relevance
     from datetime import datetime

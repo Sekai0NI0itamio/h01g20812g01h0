@@ -11,6 +11,10 @@ on:
         description: Optional broad direction for AI-generated topics
         required: false
         default: ""
+      story_text:
+        description: Optional full Reddit story text pasted by the user
+        required: false
+        default: ""
       creator_mode:
         description: Rendering mode
         required: true
@@ -38,11 +42,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       USE_C05_LOCAL_KEYS: "false"
-      SHORTS_SCRIPT_SOURCE: "auto"
-      REDDIT_FETCH_TIMEOUT_MS: "60000"
-      REDDIT_FETCH_RETRIES: "3"
-      REDDIT_FETCH_SCROLL_ROUNDS: "5"
-      REDDIT_FETCH_DEBUG: "true"
+      SHORTS_SOURCE_STORY: ${{ inputs.story_text }}
       ENABLE_YOUTUBE_UPLOAD: ${{ inputs.upload_to_youtube }}
       ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
       TOR_PROXY_URL: socks5h://127.0.0.1:9050
@@ -114,10 +114,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Install Playwright WebKit browser
-        run: |
-          python -m playwright install --with-deps webkit
 
       - name: Tune render parallelism for runner
         run: |

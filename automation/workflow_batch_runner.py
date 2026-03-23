@@ -182,6 +182,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--upload-to-youtube", default="false", help="true/false")
     parser.add_argument("--creator", choices=["auto", "video", "image"], default="auto")
     parser.add_argument("--artifacts-dir", default="workflow_artifacts", help="Folder to collect per-video artifacts")
+    parser.add_argument("--story-text", default="", help="Optional full story text pasted by the user")
     return parser.parse_args()
 
 
@@ -192,6 +193,7 @@ def main() -> int:
         raise ValueError("--count must be at least 1")
 
     upload_to_youtube = _coerce_bool(args.upload_to_youtube)
+    manual_story_text = (args.story_text or os.getenv("SHORTS_SOURCE_STORY", "")).strip()
 
     artifacts_root = Path(args.artifacts_dir).resolve()
     if artifacts_root.exists():
@@ -207,12 +209,20 @@ def main() -> int:
     logger.info("Topic direction: %s", args.topic_direction or "(auto)")
     logger.info("Creator mode: %s", args.creator)
     logger.info("YouTube upload: %s", upload_to_youtube)
+    if manual_story_text:
+        logger.info("Manual story mode enabled from workflow input")
+        if args.count != 1:
+            logger.warning("Manual story mode forces count=1 (was %s)", args.count)
+            args.count = 1
 
     selected_provider = select_working_provider_for_run()
     logger.info("AI provider locked for this run: %s", selected_provider)
 
     for index in range(1, args.count + 1):
-        topic = generate_auto_topic(args.topic_direction, index, used_topics)
+        if manual_story_text:
+            topic = _clean_topic(args.topic_direction) or "User Provided Story"
+        else:
+            topic = generate_auto_topic(args.topic_direction, index, used_topics)
         used_topics.add(topic)
         logger.info("[%s/%s] Topic: %s", index, args.count, topic)
 
@@ -221,6 +231,7 @@ def main() -> int:
             topic=topic,
             creator_type=creator_instance,
             auto_upload=upload_to_youtube,
+            source_story_text=manual_story_text,
         )
 
         if not video_path_str:

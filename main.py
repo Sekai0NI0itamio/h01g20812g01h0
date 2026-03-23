@@ -99,7 +99,7 @@ def should_auto_upload(auto_upload=None):
     return os.getenv("ENABLE_YOUTUBE_UPLOAD", "false").lower() == "true"
 
 
-def generate_youtube_short(topic, style="photorealistic", max_duration=25, creator_type=None, auto_upload=None):
+def generate_youtube_short(topic, style="photorealistic", max_duration=25, creator_type=None, auto_upload=None, source_story_text=None):
     """
     Generate a YouTube Short.
 
@@ -122,7 +122,11 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         logger.info(f"Generating comprehensive content for : {topic}")
 
         # Generate all content in a single API call
-        content_package = generate_comprehensive_content(topic, max_tokens=1200)
+        content_package = generate_comprehensive_content(
+            topic,
+            max_tokens=1200,
+            source_story_text=source_story_text,
+        )
 
         # Extract content elements
         script = content_package["script"]
