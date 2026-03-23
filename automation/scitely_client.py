@@ -115,10 +115,22 @@ def get_default_chat_provider():
 
 
 def _get_provider_order() -> List[str]:
-    raw = os.getenv("AI_PROVIDER_ORDER", "g4f")
-    parsed = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    order = [item for item in parsed if item in {"scitely", "nvidia", "g4f"}]
-    return order or ["g4f"]
+    explicit_order = os.getenv("AI_PROVIDER_ORDER", "").strip()
+    if explicit_order:
+        parsed = [item.strip().lower() for item in explicit_order.split(",") if item.strip()]
+        order = [item for item in parsed if item in {"scitely", "nvidia", "g4f"}]
+        if order:
+            return order
+
+    default_provider = get_default_chat_provider()
+    fallback_priority = [default_provider, "g4f", "nvidia", "scitely"]
+
+    order = []
+    for candidate in fallback_priority:
+        if candidate in {"scitely", "nvidia", "g4f"} and candidate not in order:
+            order.append(candidate)
+
+    return order or ["g4f", "nvidia", "scitely"]
 
 
 def _extract_completion_text(response):
@@ -367,8 +379,11 @@ def create_chat_completion(
 def select_working_provider_for_run():
     test_messages = [{"role": "user", "content": "Reply with exactly: OK"}]
     errors = []
+    provider_order = _get_provider_order()
 
-    for provider in _get_provider_order():
+    logger.info("Startup AI provider probe order: %s", provider_order)
+
+    for provider in provider_order:
         try:
             response = create_chat_completion(
                 messages=test_messages,

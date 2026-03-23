@@ -54,6 +54,7 @@ jobs:
       IMAGE_SEARCH_USE_TOR_TUNNEL: "false"
 
       AI_PROVIDER: nvidia
+      AI_PROVIDER_ORDER: nvidia,g4f,scitely
       SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
       SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
       SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
