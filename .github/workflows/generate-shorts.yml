@@ -39,6 +39,10 @@ jobs:
       PYTHONUNBUFFERED: "1"
       USE_C05_LOCAL_KEYS: "false"
       SHORTS_SCRIPT_SOURCE: "auto"
+      REDDIT_FETCH_TIMEOUT_MS: "60000"
+      REDDIT_FETCH_RETRIES: "3"
+      REDDIT_FETCH_SCROLL_ROUNDS: "5"
+      REDDIT_FETCH_DEBUG: "true"
       ENABLE_YOUTUBE_UPLOAD: ${{ inputs.upload_to_youtube }}
       ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
       TOR_PROXY_URL: socks5h://127.0.0.1:9050
