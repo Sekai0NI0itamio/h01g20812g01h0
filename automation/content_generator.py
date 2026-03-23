@@ -32,7 +32,9 @@ REDDIT_REWRITE_SYSTEM_PROMPT = (
 
 REDDIT_REWRITE_USER_TEMPLATE = (
     "Here is the story:\n\n{story}\n\n"
-    "Rewrite this in first-person perspective as a short, immersive narrative."
+    "Rewrite this as a single, focused paragraph in first-person perspective.\n"
+    "Keep all key events and details, enhance emotional texture and sensory moments, and use a natural, conversational tone.\n"
+    "Return exactly one paragraph (no lists or line breaks)."
 )
 
 
@@ -217,16 +219,18 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
     {rewritten_story}
 
     Return ONE valid JSON object with these exact fields:
-    1) script
-    2) title
-    3) description
-    4) thumbnail_hf_prompt
-    5) thumbnail_unsplash_query
+    1) paragraph       -- a single first-person paragraph (the narrated text used for the narration audio)
+    2) script          -- 8 to 16 short lines (newline-separated) derived directly from the paragraph for captions, visual beats and SFX timing
+    3) title
+    4) description
+    5) thumbnail_hf_prompt
+    6) thumbnail_unsplash_query
 
     Requirements:
-    - script must be 20 to 30 lines, newline-separated, one spoken beat per line.
-    - script must stay first person and preserve the original emotional arc.
-    - script lines should be concise (roughly 4 to 12 words each).
+    - paragraph must be exactly one paragraph (no internal line breaks) in first-person.
+    - script must be derived from the paragraph (break the paragraph into concise caption-sized beats).
+    - script should be 8 to 16 lines, one caption/beat per line, each 4-12 words.
+    - script must preserve the emotional arc and refer directly to the content of the paragraph.
     - no labels like Hook/Intro/Outro and no call-to-action line.
     - title should be 40-60 characters and click-worthy.
     - description should be 100-200 characters and include 3-4 hashtags.
@@ -269,45 +273,17 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries):
             )
 
             content_package = _parse_json_response(response_content)
-            required_fields = ["script", "title", "description", "thumbnail_hf_prompt", "thumbnail_unsplash_query"]
+            required_fields = ["paragraph", "script", "title", "description", "thumbnail_hf_prompt", "thumbnail_unsplash_query"]
             missing_fields = [field for field in required_fields if field not in content_package]
             if missing_fields:
                 raise ValueError(f"Missing required fields in response: {missing_fields}")
 
-            # Post-process the generated package: simplify the script in the same conversation
-            # by asking the model to remove descriptive words and rewrite the `script` as
-            # plain, grade-1-level, colloquial text (allowing grammatical failures).
-            try:
-                assistant_raw = response_content if isinstance(response_content, str) else json.dumps(response_content)
+            # Ensure paragraph is a single paragraph and strip unnecessary whitespace
+            paragraph = str(content_package.get("paragraph", "") or "").strip().replace("\n", " ")
+            content_package["paragraph"] = paragraph
 
-                followup_instructions = (
-                    "Now refine the previously generated content. Take the 'script' field produced above and:"
-                    "\n- Remove descriptive/adjective/adverb words so lines are plain and concrete."
-                    "\n- Rewrite the script in extremely simple English (grade 1 reading level)."
-                    "\n- Allow colloquial modern childlike phrasing and minor grammatical errors to match how children speak."
-                    "\n- Keep the same number of lines (20-30) and keep them short (4-12 words each)."
-                    "\n- Output ONLY the rewritten script as plain newline-separated lines. Do NOT include markdown, labels, or extra keys."
-                )
-
-                # Build messages representing the same conversation: user prompt -> assistant response -> user follow-up
-                messages = [
-                    {"role": "user", "content": package_prompt},
-                    {"role": "assistant", "content": assistant_raw},
-                    {"role": "user", "content": followup_instructions},
-                ]
-
-                simplified_script = _create_text_completion(
-                    messages=messages,
-                    model=model,
-                    max_tokens=500,
-                    temperature=0.9,
-                )
-
-                if isinstance(simplified_script, str) and simplified_script.strip():
-                    content_package["script"] = filter_instructional_labels(simplified_script)
-            except Exception:
-                # If anything goes wrong with the follow-up refinement, keep original script
-                content_package["script"] = filter_instructional_labels(content_package["script"])
+            # Clean script lines but ensure they are derived from the paragraph
+            content_package["script"] = filter_instructional_labels(content_package["script"]) if "script" in content_package else ""
             if source_link:
                 content_package["source_story_permalink"] = source_link
             if source_title:

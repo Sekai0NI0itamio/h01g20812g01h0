@@ -13,6 +13,7 @@ from automation.content_generator import (
     generate_sound_effect_plan,
     generate_meme_insertion_plan,
 )
+from helper.audio import AudioHelper
 from automation.shorts_maker_V import YTShortsCreator_V
 from automation.shorts_maker_I import YTShortsCreator_I
 from automation.thumbnail import ThumbnailGenerator
@@ -130,6 +131,7 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
 
         # Extract content elements
         script = content_package["script"]
+        paragraph = content_package.get("paragraph", "")
         title = content_package["title"].strip()
         description = content_package["description"]
         thumbnail_image_prompt = content_package["thumbnail_hf_prompt"]
@@ -153,6 +155,19 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
             logger.info(f"Saved script to: {script_output_path}")
         except Exception as script_write_error:
             logger.warning(f"Failed to save script file: {script_write_error}")
+
+        # Also generate a single narration audio file for the full paragraph (if provided)
+        if paragraph:
+            try:
+                audio_helper = AudioHelper()
+                para_audio_path = os.path.join(output_dir, f"narration_paragraph_{safe_title}_{timestamp}.wav")
+                created = audio_helper.create_tts_audio(paragraph, filename=para_audio_path)
+                if created:
+                    logger.info(f"Generated paragraph narration audio: {created}")
+                else:
+                    logger.warning("Failed to generate paragraph narration audio")
+            except Exception as e:
+                logger.exception("Error generating paragraph narration audio: %s", e)
 
         # Parse script into cards as before
         script_cards = parse_script_to_cards(script)
