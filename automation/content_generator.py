@@ -380,8 +380,8 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
     Ask the LLM to place sound effects on script lines.
 
     Constraints:
-    - 6 to 10 effects
-    - At least 1 line gap between used lines (index delta >= 2)
+    - Minimum effects: (total_lines // 2) - 4
+    - No line-position spacing limits
     - effect_file must be from provided sound_effect_files list
     """
     if not script_lines or not sound_effect_files:
@@ -394,6 +394,10 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
     model = model or get_scitely_model()
     if is_scitely_disabled():
         logger.info("Scitely is disabled; sound effect planning will use NVIDIA")
+
+    total_lines = len(script_lines)
+    min_required = max(1, (total_lines // 2) - 4)
+    max_effects = total_lines
 
     formatted_lines = "\n".join(
         [f"{idx}: {line}" for idx, line in enumerate(script_lines)]
@@ -411,11 +415,11 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
     {formatted_sfx}
 
     Rules:
-    1) Choose between 6 and 10 sound effects total.
-    2) Effects must be spaced with at least one line between them.
+    1) Choose at least {min_required} sound effects total (you may choose more, up to {max_effects}).
+    2) Effects may be placed on any lines (adjacent lines are allowed).
     3) Use only listed file names.
     4) Choose moments that add impact without overusing effects.
-    5) offset_seconds is the start time inside that line and should be between 0.0 and 2.0.
+    5) offset_seconds is the start time inside that line and should be between 0.0 and 4.0.
 
     Return ONLY valid JSON in this schema:
     {{
@@ -457,7 +461,7 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
                     offset = float(item.get("offset_seconds", 0.0))
                 except Exception:
                     offset = 0.0
-                offset = max(0.0, min(2.0, offset))
+                offset = max(0.0, min(4.0, offset))
 
                 normalized.append(
                     {
@@ -467,38 +471,32 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
                     }
                 )
 
-            # Enforce spacing and 6-10 count deterministically
+            # Enforce deterministic count and validity
             normalized.sort(key=lambda x: x["line_index"])
             final_plan = []
-            last_idx = None
             used_lines = set()
             for entry in normalized:
-                if len(final_plan) >= 10:
+                if len(final_plan) >= max_effects:
                     break
                 idx = entry["line_index"]
                 if idx in used_lines:
                     continue
-                if last_idx is not None and (idx - last_idx) < 2:
-                    continue
                 final_plan.append(entry)
                 used_lines.add(idx)
-                last_idx = idx
 
-            if len(final_plan) < 6:
+            if len(final_plan) < min_required:
                 used_lines = {x["line_index"] for x in final_plan}
                 for idx in range(len(script_lines)):
-                    if len(final_plan) >= 6:
+                    if len(final_plan) >= min_required:
                         break
                     if idx in used_lines:
-                        continue
-                    if any(abs(idx - x["line_index"]) < 2 for x in final_plan):
                         continue
                     fallback_name = sound_effect_files[len(final_plan) % len(sound_effect_files)]
                     final_plan.append(
                         {
                             "line_index": idx,
                             "effect_file": fallback_name,
-                            "offset_seconds": 0.2,
+                            "offset_seconds": 0.0,
                         }
                     )
                     used_lines.add(idx)

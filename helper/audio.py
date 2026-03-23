@@ -33,6 +33,7 @@ class AudioHelper:
         os.makedirs(self.temp_dir, exist_ok=True)
 
         self.freevoicereader_tts = None
+        self.max_tts_gap_seconds = float(os.getenv("TTS_MAX_GAP_SECONDS", "0.4"))
         use_freevoicereader = os.getenv("USE_FREEVOICEREADER_TTS", "true").lower()
         logger.info("USE_FREEVOICEREADER_TTS=%s", use_freevoicereader)
 
@@ -82,7 +83,8 @@ class AudioHelper:
                     voice_style=voice_style,
                 )
                 try:
-                    return self._speedup_audio(out, speed=1.3)
+                    sped = self._speedup_audio(out, speed=1.3)
+                    return self._normalize_tts_pacing(sped)
                 except Exception:
                     return out
             except Exception as e:
@@ -261,3 +263,40 @@ class AudioHelper:
             except Exception:
                 pass
             raise
+
+    def _normalize_tts_pacing(self, input_path):
+        """
+        Trim excessive silence so pauses between consecutive TTS clips stay short.
+        Keeps at most self.max_tts_gap_seconds trailing silence.
+        """
+        try:
+            _, ext = os.path.splitext(input_path)
+            dirn = os.path.dirname(input_path) or '.'
+            fd, tmp_out = tempfile.mkstemp(suffix=ext, dir=dirn)
+            os.close(fd)
+
+            keep_tail = max(0.05, min(self.max_tts_gap_seconds, 0.4))
+            filter_chain = (
+                "silenceremove="
+                f"start_periods=1:start_silence=0.05:start_threshold=-40dB:"
+                f"stop_periods=1:stop_silence={keep_tail:.2f}:stop_threshold=-40dB"
+            )
+
+            cmd = [
+                'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                '-i', input_path,
+                '-af', filter_chain,
+                tmp_out
+            ]
+            subprocess.run(cmd, check=True)
+            os.replace(tmp_out, input_path)
+            logger.info("Normalized TTS pacing for %s (max gap %.2fs)", input_path, keep_tail)
+            return input_path
+        except Exception as e:
+            logger.warning("Failed to normalize TTS pacing for %s: %s", input_path, e)
+            try:
+                if 'tmp_out' in locals() and os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+            except Exception:
+                pass
+            return input_path

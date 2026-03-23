@@ -220,14 +220,14 @@ def add_background_music_to_video(video_path, music_dir=None, volume_scale=None,
 def add_anime_greenscreen_overlay_to_video(
     video_path,
     greenscreen_dir=None,
-    scale_factor=0.5,
+    scale_factor=0.5774,
     chroma_similarity=None,
     chroma_blend=None,
     preset="ultrafast",
 ):
     """
     Overlay a random green-screen anime clip on bottom-left of the final video.
-    The overlay is scaled to 1/4 of the base frame area (half width, half height).
+    Default scaling targets ~1/3 of the base frame area.
     """
     if not video_path or not os.path.exists(video_path):
         return video_path
