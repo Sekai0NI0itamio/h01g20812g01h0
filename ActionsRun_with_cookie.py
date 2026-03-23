@@ -10,8 +10,9 @@ Behavior:
   `freevoicereader_cookie` and the workflow will be dispatched with upload enabled.
 
 Usage examples:
+  python3 ActionsRun_with_cookie.py --token $GITHUB_TOKEN
   python3 ActionsRun_with_cookie.py --token $GITHUB_TOKEN --story-file redit_story.txt
-  python3 ActionsRun_with_cookie.py --dry-run --story-file redit_story.txt
+  python3 ActionsRun_with_cookie.py --dry-run
 
 Note: This script uses only stdlib modules and requires macOS + Google Chrome.
 """
@@ -24,6 +25,15 @@ import subprocess
 import sys
 import urllib.request
 import urllib.error
+
+
+def _read_story_text(path):
+        if not path:
+                return ""
+        if not os.path.exists(path):
+                raise FileNotFoundError(f"Story file not found: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
 
 
 def get_cookie_from_chrome(domain_substring="freevoicereader.com"):
@@ -117,7 +127,12 @@ def dispatch_workflow(repo, workflow_file, ref, token, inputs):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--token", help="GitHub token (or set GITHUB_TOKEN env)")
-    p.add_argument("--story-file", default="redit_story.txt")
+    p.add_argument("--story-file", default="", help="Optional path to a story text file. Leave empty to let the app synthesize its own Reddit-style story.")
+    p.add_argument("--topic-direction", default="", help="Optional topic or story-direction bias for synthetic story generation")
+    p.add_argument("--video-count", default="1", help="Number of shorts to generate")
+    p.add_argument("--creator-mode", choices=["auto", "video", "image"], default="auto")
+    p.add_argument("--upload-to-youtube", choices=["true", "false"], default="true")
+    p.add_argument("--use-tor-tunnel", choices=["true", "false"], default="true")
     p.add_argument("--workflow", default="generate-shorts.yml", help="workflow filename in .github/workflows")
     p.add_argument("--repo", help="owner/repo (auto-detected from git origin if omitted)")
     p.add_argument("--ref", default="main", help="git ref to dispatch against")
@@ -125,14 +140,12 @@ def main():
     args = p.parse_args()
 
     token = args.token or os.environ.get("GITHUB_TOKEN")
-    story_path = args.story_file
-
-    if not os.path.exists(story_path):
-        print(f"Story file not found: {story_path}")
+    story_path = (args.story_file or "").strip()
+    try:
+        story = _read_story_text(story_path)
+    except FileNotFoundError as exc:
+        print(str(exc))
         sys.exit(2)
-
-    with open(story_path, "r", encoding="utf-8") as f:
-        story = f.read()
 
     # Attempt to capture cookie from Chrome if available
     cookie_string = get_cookie_from_chrome()
@@ -147,11 +160,12 @@ def main():
         sys.exit(3)
 
     inputs = {
-        "video_count": "1",
-        "upload_to_youtube": "true",
+        "video_count": str(args.video_count),
+        "topic_direction": str(args.topic_direction or ""),
+        "upload_to_youtube": str(args.upload_to_youtube),
         "story_text": story,
-        "creator_mode": "auto",
-        "use_tor_tunnel": "true",
+        "creator_mode": args.creator_mode,
+        "use_tor_tunnel": str(args.use_tor_tunnel),
         "freevoicereader_cookie": cookie_string or ""
     }
 
