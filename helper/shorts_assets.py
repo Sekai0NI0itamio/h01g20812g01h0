@@ -223,14 +223,14 @@ def add_background_music_to_video(video_path, music_dir=None, volume_scale=None,
 def add_anime_greenscreen_overlay_to_video(
     video_path,
     greenscreen_dir=None,
-    scale_factor=0.5774,
+    scale_factor=0.6929,
     chroma_similarity=None,
     chroma_blend=None,
     preset="ultrafast",
 ):
     """
-    Overlay a random green-screen anime clip on bottom-left of the final video.
-    Default scaling targets ~1/3 of the base frame area.
+    Overlay a random green-screen anime clip centered in the 4th quadrant (bottom-right).
+    Default scaling is 20% larger than previous baseline.
     """
     if not video_path or not os.path.exists(video_path):
         return video_path
@@ -255,7 +255,10 @@ def add_anime_greenscreen_overlay_to_video(
     filter_complex = (
         f"[1:v][0:v]scale2ref=w=main_w*{float(scale_factor):.4f}:h=main_h*{float(scale_factor):.4f}[anime_s][base];"
         f"[anime_s]chromakey=0x00FF00:{chroma_similarity:.4f}:{chroma_blend:.4f}[anime];"
-        f"[base][anime]overlay=0:main_h-overlay_h:shortest=1[outv]"
+        f"[base][anime]overlay="
+        f"x='max(0,min(main_w-overlay_w,main_w*0.75-overlay_w/2))':"
+        f"y='max(0,min(main_h-overlay_h,main_h*0.75-overlay_h/2))':"
+        f"shortest=1[outv]"
     )
 
     cmd = [

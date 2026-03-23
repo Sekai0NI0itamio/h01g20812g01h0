@@ -34,6 +34,10 @@ on:
         required: true
         default: true
         type: boolean
+      freevoicereader_cookie:
+        description: Optional FreeVoiceReader cookie string to override stored secret
+        required: false
+        default: ""
 
 jobs:
   generate-shorts:
@@ -66,7 +70,7 @@ jobs:
       FREEVOICEREADER_TTS_TIMEOUT: ${{ secrets.FREEVOICEREADER_TTS_TIMEOUT }}
       FREEVOICEREADER_TTS_REQUEST_RETRIES: "4"
       FREEVOICEREADER_TTS_RETRY_BACKOFF_SECONDS: "1.5"
-      FREEVOICEREADER_TTS_COOKIE: ${{ secrets.FREEVOICEREADER_TTS_COOKIE }}
+      FREEVOICEREADER_TTS_COOKIE: ${{ inputs.freevoicereader_cookie != '' && inputs.freevoicereader_cookie || secrets.FREEVOICEREADER_TTS_COOKIE }}
       FREEVOICEREADER_TTS_COOKIE_TOKEN: ${{ secrets.FREEVOICEREADER_TTS_COOKIE_TOKEN }}
       FREEVOICEREADER_TTS_COOKIE_NAME: ${{ secrets.FREEVOICEREADER_TTS_COOKIE_NAME }}
       TTS_GENERATION_RETRIES: "3"
