@@ -47,7 +47,7 @@ class AudioHelper:
                 logger.exception("Failed to initialize FreeVoiceReader TTS")
 
     @measure_time
-    def create_tts_audio(self, text, filename=None, voice_style="none"):
+    def create_tts_audio(self, text, filename=None, voice_style="none", min_duration=None):
         """
         Create TTS audio file with robust error handling
 
@@ -84,7 +84,8 @@ class AudioHelper:
                 )
                 try:
                     sped = self._speedup_audio(out, speed=1.1)
-                    return self._normalize_tts_pacing(sped)
+                    normalized = self._normalize_tts_pacing(sped)
+                    return self._ensure_min_duration(normalized, min_duration)
                 except Exception:
                     return out
             except Exception as e:
@@ -129,8 +130,9 @@ class AudioHelper:
             text = section.get('text', '')
             section_id = section.get('id', int(time.time()))
             filename = os.path.join(self.temp_dir, f"audio_{section_id}.wav")
+            target_duration = float(section.get('duration', 0.0) or 0.0)
 
-            return self.create_tts_audio(text, filename, section_voice)
+            return self.create_tts_audio(text, filename, section_voice, min_duration=target_duration)
 
         workers = max_workers or min(len(script_sections), os.cpu_count() * 2)
         audio_files = []
@@ -275,11 +277,11 @@ class AudioHelper:
             fd, tmp_out = tempfile.mkstemp(suffix=ext, dir=dirn)
             os.close(fd)
 
-            keep_tail = max(0.05, min(self.max_tts_gap_seconds, 0.7))
+            keep_tail = max(0.05, min(self.max_tts_gap_seconds, 0.25))
+            # Trim trailing silence only (via reverse-pass) to avoid clipping spoken attack words.
             filter_chain = (
-                "silenceremove="
-                f"start_periods=1:start_silence=0.05:start_threshold=-40dB:"
-                f"stop_periods=1:stop_silence={keep_tail:.2f}:stop_threshold=-40dB"
+                f"areverse,silenceremove=start_periods=1:start_silence={keep_tail:.2f}:"
+                "start_threshold=-55dB,areverse"
             )
 
             cmd = [
@@ -294,6 +296,49 @@ class AudioHelper:
             return input_path
         except Exception as e:
             logger.warning("Failed to normalize TTS pacing for %s: %s", input_path, e)
+            try:
+                if 'tmp_out' in locals() and os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+            except Exception:
+                pass
+            return input_path
+
+    def _ensure_min_duration(self, input_path, min_duration):
+        """Pad with silence when needed so a section's sped-up clip never undershoots its target duration."""
+        try:
+            min_duration = float(min_duration or 0.0)
+            if min_duration <= 0.0:
+                return input_path
+
+            clip = AudioFileClip(input_path)
+            current_duration = float(clip.duration or 0.0)
+            clip.close()
+
+            if current_duration >= min_duration:
+                return input_path
+
+            _, ext = os.path.splitext(input_path)
+            dirn = os.path.dirname(input_path) or '.'
+            fd, tmp_out = tempfile.mkstemp(suffix=ext, dir=dirn)
+            os.close(fd)
+
+            cmd = [
+                'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                '-i', input_path,
+                '-af', f"apad,atrim=0:{min_duration:.3f}",
+                tmp_out,
+            ]
+            subprocess.run(cmd, check=True)
+            os.replace(tmp_out, input_path)
+            logger.info(
+                "Padded audio %s from %.2fs to minimum %.2fs",
+                input_path,
+                current_duration,
+                min_duration,
+            )
+            return input_path
+        except Exception as e:
+            logger.warning("Failed to enforce min duration for %s: %s", input_path, e)
             try:
                 if 'tmp_out' in locals() and os.path.exists(tmp_out):
                     os.remove(tmp_out)

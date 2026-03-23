@@ -381,7 +381,7 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
     Ask the LLM to place sound effects on script lines.
 
     Constraints:
-    - Minimum effects: ceil(total_lines * 2/3) - 4
+    - Minimum effects: ceil(total_lines * 2/3) - 5
     - No line-position spacing limits
     - effect_file must be from provided sound_effect_files list
     """
@@ -397,7 +397,7 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
         logger.info("Scitely is disabled; sound effect planning will use NVIDIA")
 
     total_lines = len(script_lines)
-    min_required = max(1, math.ceil((total_lines * 2) / 3) - 4)
+    min_required = max(1, math.ceil((total_lines * 2) / 3) - 5)
     max_effects = total_lines
 
     formatted_lines = "\n".join(
@@ -589,7 +589,7 @@ def generate_meme_insertion_plan(
         logger.info("Scitely is disabled; meme insertion planning will use NVIDIA")
 
     max_effective = max(1, min(int(max_insertions), 11, len(script_lines)))
-    formula_min = math.ceil((len(script_lines) * 2) / 3) - 5
+    formula_min = math.ceil((len(script_lines) * 2) / 3) - 4
     requested_min = formula_min if min_insertions is None else int(min_insertions)
     min_effective = max(1, min(requested_min, max_effective))
 
