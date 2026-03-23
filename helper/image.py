@@ -5,6 +5,7 @@ import requests
 import logging
 import concurrent.futures
 import re
+from urllib.parse import quote_plus
 from moviepy  import VideoClip, concatenate_videoclips, ColorClip, CompositeVideoClip, ImageClip, TextClip
 from helper.blur import custom_blur, custom_edge_blur
 from helper.minor_helper import measure_time
@@ -67,6 +68,104 @@ temp_dir = os.path.join(TEMP_DIR, "generated_images")
 os.makedirs(temp_dir, exist_ok=True)  # Create temp directory if it doesn't exist
 REQUESTS_SESSION = create_requests_session()
 
+REALISTIC_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+]
+
+
+def _browser_headers(referer):
+    return {
+        "User-Agent": random.choice(REALISTIC_USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": referer,
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+
+def _download_image_url(image_url, file_path, referer):
+    headers = _browser_headers(referer)
+    resp = REQUESTS_SESSION.get(image_url, headers=headers, timeout=15)
+    if resp.status_code != 200:
+        return None
+    if not resp.content:
+        return None
+    with open(file_path, "wb") as f:
+        f.write(resp.content)
+    return file_path
+
+
+def _extract_candidate_image_urls(html_text):
+    if not html_text:
+        return []
+
+    candidates = []
+
+    # Common search-engine image CDN patterns.
+    patterns = [
+        r"https://imgs\.search\.brave\.com/[^\"'\s<>]+",
+        r"https://images\.ecosia\.org/[^\"'\s<>]+",
+        r"https://external-content\.duckduckgo\.com/iu/\?u=[^\"'\s<>]+",
+        r"https://[^\"'\s<>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\"'\s<>]*)?",
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(pattern, html_text, flags=re.IGNORECASE)
+        for m in matches:
+            if m not in candidates:
+                candidates.append(m)
+
+    return candidates
+
+
+def _fetch_image_from_brave(query, file_path):
+    if not query:
+        return None
+
+    try:
+        url = f"https://search.brave.com/images?q={quote_plus(query)}"
+        resp = REQUESTS_SESSION.get(url, headers=_browser_headers("https://search.brave.com/"), timeout=15)
+        if resp.status_code != 200:
+            logger.warning("Brave image search failed: %s", resp.status_code)
+            return None
+
+        for image_url in _extract_candidate_image_urls(resp.text):
+            written = _download_image_url(image_url, file_path, "https://search.brave.com/")
+            if written:
+                logger.info("Brave image downloaded to %s for query '%s'", file_path, query)
+                return written
+    except Exception as e:
+        logger.warning("Brave image fetch failed for '%s': %s", query, e)
+
+    return None
+
+
+def _fetch_image_from_ecosia(query, file_path):
+    if not query:
+        return None
+
+    try:
+        url = f"https://www.ecosia.org/images?q={quote_plus(query)}"
+        resp = REQUESTS_SESSION.get(url, headers=_browser_headers("https://www.ecosia.org/"), timeout=15)
+        if resp.status_code != 200:
+            logger.warning("Ecosia image search failed: %s", resp.status_code)
+            return None
+
+        for image_url in _extract_candidate_image_urls(resp.text):
+            written = _download_image_url(image_url, file_path, "https://www.ecosia.org/")
+            if written:
+                logger.info("Ecosia image downloaded to %s for query '%s'", file_path, query)
+                return written
+    except Exception as e:
+        logger.warning("Ecosia image fetch failed for '%s': %s", query, e)
+
+    return None
+
 @measure_time
 def fetch_image_from_duckduckgo(query, file_path=None):
     """
@@ -79,12 +178,12 @@ def fetch_image_from_duckduckgo(query, file_path=None):
     if not file_path:
         file_path = os.path.join(temp_dir, f"duckduckgo_{int(time.time())}_{random.randint(1000, 9999)}.jpg")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://duckduckgo.com/",
-    }
+    headers = _browser_headers("https://duckduckgo.com/")
 
     try:
+        if REQUESTS_SESSION.proxies:
+            logger.info("DuckDuckGo image search using proxy: %s", REQUESTS_SESSION.proxies.get("https"))
+
         # 1) Get vqd token from initial search page.
         token_resp = REQUESTS_SESSION.get(
             "https://duckduckgo.com/",
@@ -118,7 +217,10 @@ def fetch_image_from_duckduckgo(query, file_path=None):
         )
         if image_resp.status_code != 200:
             logger.warning("DuckDuckGo image search failed: %s", image_resp.status_code)
-            return None
+            brave_fallback = _fetch_image_from_brave(query, file_path)
+            if brave_fallback:
+                return brave_fallback
+            return _fetch_image_from_ecosia(query, file_path)
 
         payload = image_resp.json() or {}
         results = payload.get("results", [])
@@ -136,7 +238,10 @@ def fetch_image_from_duckduckgo(query, file_path=None):
         download_resp = REQUESTS_SESSION.get(image_url, headers=headers, timeout=12)
         if download_resp.status_code != 200:
             logger.warning("Failed to download DuckDuckGo image: %s", download_resp.status_code)
-            return None
+            brave_fallback = _fetch_image_from_brave(query, file_path)
+            if brave_fallback:
+                return brave_fallback
+            return _fetch_image_from_ecosia(query, file_path)
 
         with open(file_path, "wb") as f:
             f.write(download_resp.content)
@@ -145,7 +250,10 @@ def fetch_image_from_duckduckgo(query, file_path=None):
         return file_path
     except Exception as e:
         logger.warning("DuckDuckGo image fetch failed for '%s': %s", query, e)
-        return None
+        brave_fallback = _fetch_image_from_brave(query, file_path)
+        if brave_fallback:
+            return brave_fallback
+        return _fetch_image_from_ecosia(query, file_path)
 
 @measure_time
 def generate_images_parallel(prompts, style="photorealistic", max_workers=None):
