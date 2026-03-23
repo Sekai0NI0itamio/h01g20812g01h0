@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 
 import requests
@@ -46,6 +47,16 @@ class FreeVoiceReaderVoiceover:
             "FREEVOICEREADER_TTS_API_URL",
             "https://www.freevoicereader.com/api/free-tts",
         )
+        self.cookie_header = os.getenv("FREEVOICEREADER_TTS_COOKIE", "").strip()
+        self.cookie_token = os.getenv("FREEVOICEREADER_TTS_COOKIE_TOKEN", "").strip()
+        self.cookie_name = _env_or_default("FREEVOICEREADER_TTS_COOKIE_NAME", "token")
+
+        if self.cookie_header:
+            logger.info("FreeVoiceReader custom Cookie header configured via FREEVOICEREADER_TTS_COOKIE")
+        elif self.cookie_token:
+            logger.info("FreeVoiceReader cookie token configured via FREEVOICEREADER_TTS_COOKIE_TOKEN")
+        else:
+            logger.warning("FreeVoiceReader cookie token is not configured; API may return HTTP 403")
 
     def _headers(self):
         headers = {
@@ -54,7 +65,21 @@ class FreeVoiceReaderVoiceover:
             "Referer": "https://www.freevoicereader.com/",
             "User-Agent": "Mozilla/5.0",
         }
+        if self.cookie_header:
+            headers["Cookie"] = self.cookie_header
+        elif self.cookie_token:
+            headers["Cookie"] = f"{self.cookie_name}={self.cookie_token}"
         return headers
+
+    def _safe_error_preview(self, response_text):
+        text = (response_text or "").strip()
+        if not text:
+            return ""
+
+        # Strip token-like segments to avoid leaking secrets in logs.
+        text = re.sub(r"\b\d{8,}-[A-Za-z0-9]{10,}\b", "[redacted-token]", text)
+        text = re.sub(r"\b[A-Za-z0-9_\-]{24,}\b", "[redacted]", text)
+        return text[:240]
 
     def _ensure_wav_path(self, output_filename):
         if not output_filename:
@@ -110,6 +135,9 @@ class FreeVoiceReaderVoiceover:
             "voice": (None, self.voice),
             "title": (None, self._title_from_output_filename(output_filename)),
         }
+        if self.cookie_token:
+            # Some FreeVoiceReader deployments validate token in form-data in addition to cookie.
+            files["token"] = (None, self.cookie_token)
 
         response = REQUESTS_SESSION.post(
             self.api_url,
@@ -119,7 +147,10 @@ class FreeVoiceReaderVoiceover:
         )
 
         if response.status_code >= 400:
-            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:240]}")
+            safe_preview = self._safe_error_preview(response.text)
+            if safe_preview:
+                raise RuntimeError(f"HTTP {response.status_code}: {safe_preview}")
+            raise RuntimeError(f"HTTP {response.status_code}")
 
         written = self._write_audio_payload(response, output_filename)
         if written and os.path.exists(written) and os.path.getsize(written) > 0:

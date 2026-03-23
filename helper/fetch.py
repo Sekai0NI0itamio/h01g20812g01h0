@@ -6,6 +6,7 @@ from moviepy  import VideoFileClip
 import logging
 import time
 from helper.minor_helper import measure_time
+from helper.network import create_requests_session
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -14,6 +15,15 @@ logger = logging.getLogger(__name__)
 # Create temp directories if they don't exist
 video_temp_dir = os.path.join("automation", "temp", "video_downloads")
 os.makedirs(video_temp_dir, exist_ok=True)
+REQUESTS_SESSION = create_requests_session()
+
+
+def _log_proxy_usage(provider_name):
+    proxy = REQUESTS_SESSION.proxies.get("https") if REQUESTS_SESSION.proxies else None
+    if proxy:
+        logger.info("%s requests using proxy: %s", provider_name, proxy)
+    else:
+        logger.warning("%s requests are not using Tor proxy", provider_name)
 
 # Try to load API keys from environment variables
 try:
@@ -138,7 +148,7 @@ def _download_with_retry(url, output_path, headers=None, max_retries=MAX_RETRIES
     """
     for attempt in range(max_retries):
         try:
-            with requests.get(url, headers=headers, stream=True) as r:
+            with REQUESTS_SESSION.get(url, headers=headers, stream=True, timeout=30) as r:
                 r.raise_for_status()
                 with open(output_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=chunk_size):
@@ -177,7 +187,8 @@ def _fetch_from_pixabay(query, count, min_duration):
             return []
 
         url = f"https://pixabay.com/api/videos/?key={pixabay_api_key}&q={query}&min_width=1080&min_height=1920&per_page=20"
-        response = requests.get(url)
+        _log_proxy_usage("Pixabay")
+        response = REQUESTS_SESSION.get(url, timeout=20)
         if response.status_code == 200:
             data = response.json()
             videos = data.get("hits", [])
@@ -273,7 +284,8 @@ def _fetch_from_pexels(query, count=5, min_duration=15):
 
         url = f"https://api.pexels.com/videos/search?query={query}&per_page=20&orientation=portrait"
         headers = {"Authorization": pexels_api_key}
-        response = requests.get(url, headers=headers)
+        _log_proxy_usage("Pexels")
+        response = REQUESTS_SESSION.get(url, headers=headers, timeout=20)
         if response.status_code == 200:
             data = response.json()
             videos = data.get("videos", [])
@@ -400,7 +412,8 @@ def fetch_image_unsplash(self, query, file_path=None):
             "client_id": self.unsplash_api_key
         }
 
-        response = requests.get(self.unsplash_api_url, params=params, timeout=10)
+        _log_proxy_usage("Unsplash")
+        response = REQUESTS_SESSION.get(self.unsplash_api_url, params=params, timeout=20)
 
         if response.status_code == 200:
             data = response.json()
@@ -413,7 +426,7 @@ def fetch_image_unsplash(self, query, file_path=None):
                 image_url = image_data["urls"]["regular"]
 
                 # Download the image
-                img_response = requests.get(image_url, timeout=10)
+                img_response = REQUESTS_SESSION.get(image_url, timeout=20)
                 if img_response.status_code == 200:
                     with open(file_path, "wb") as f:
                         f.write(img_response.content)

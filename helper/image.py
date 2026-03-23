@@ -68,6 +68,14 @@ temp_dir = os.path.join(TEMP_DIR, "generated_images")
 os.makedirs(temp_dir, exist_ok=True)  # Create temp directory if it doesn't exist
 REQUESTS_SESSION = create_requests_session()
 
+
+def _log_proxy_usage(provider_name):
+    proxy = REQUESTS_SESSION.proxies.get("https") if REQUESTS_SESSION.proxies else None
+    if proxy:
+        logger.info("%s requests using proxy: %s", provider_name, proxy)
+    else:
+        logger.warning("%s requests are not using Tor proxy", provider_name)
+
 REALISTIC_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -181,8 +189,7 @@ def fetch_image_from_duckduckgo(query, file_path=None):
     headers = _browser_headers("https://duckduckgo.com/")
 
     try:
-        if REQUESTS_SESSION.proxies:
-            logger.info("DuckDuckGo image search using proxy: %s", REQUESTS_SESSION.proxies.get("https"))
+        _log_proxy_usage("DuckDuckGo")
 
         # 1) Get vqd token from initial search page.
         token_resp = REQUESTS_SESSION.get(
@@ -381,6 +388,7 @@ def _fetch_image_from_unsplash(query, file_path=None):
         }
 
         # Make request
+        _log_proxy_usage("Unsplash")
         response = REQUESTS_SESSION.get(url, params=params)
 
         if response.status_code == 200:
@@ -436,6 +444,7 @@ def _fetch_image_from_pexels(query, file_path=None):
         }
 
         # Make request
+        _log_proxy_usage("Pexels")
         response = REQUESTS_SESSION.get(url, headers=headers, params=params)
 
         if response.status_code == 200:
@@ -479,6 +488,19 @@ def create_clip(args):
     except Exception as e:
         logger.error(f"Error creating image clip: {e}")
         return None
+
+
+def _center_crop_clip(clip, width, height):
+    """MoviePy compatibility helper for center-cropping across versions."""
+    w, h = clip.size
+    x1 = max(0, int((w - width) / 2))
+    y1 = max(0, int((h - height) / 2))
+
+    if hasattr(clip, "cropped"):
+        return clip.cropped(x1=x1, y1=y1, width=width, height=height)
+    if hasattr(clip, "crop"):
+        return clip.crop(x1=x1, y1=y1, width=width, height=height)
+    raise AttributeError("Image clip does not support crop/cropped")
 
 @measure_time
 def create_image_clips_parallel(image_paths, durations, texts=None, with_zoom=True, max_workers=None):
@@ -576,11 +598,7 @@ def _create_still_image_clip(image_path, duration, text=None, text_position=('ce
 
   # Center crop if needed
   if new_width > resolution[0] or new_height > resolution[1]:
-      x_center = new_width // 2
-      y_center = new_height // 2
-      x1 = max(0, x_center - resolution[0] // 2)
-      y1 = max(0, y_center - resolution[1] // 2)
-      image = image.crop(x1=x1, y1=y1, width=resolution[0], height=resolution[1])
+      image = _center_crop_clip(image, resolution[0], resolution[1])
 
   # Add zoom effect if requested
   if with_zoom:
