@@ -337,6 +337,51 @@ class AudioHelper:
 
         return normalized
 
+    def slice_audio_by_sections(self, audio_path, script_sections, output_prefix="master_section"):
+        """
+        Slice a master narration audio file into per-section clips using transcript timestamps.
+        """
+        if not self._is_valid_audio_file(audio_path):
+            logger.warning("Master audio is missing or invalid: %s", audio_path)
+            return []
+
+        audio_data = []
+        for idx, section in enumerate(script_sections or []):
+            start_time = max(0.0, float(section.get("start_time", 0.0) or 0.0))
+            end_time = max(start_time, float(section.get("end_time", start_time) or start_time))
+            clip_duration = max(0.12, end_time - start_time)
+            output_path = os.path.join(self.temp_dir, f"{output_prefix}_{idx:02d}.wav")
+
+            try:
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", audio_path,
+                    "-ss", f"{start_time:.3f}",
+                    "-t", f"{clip_duration:.3f}",
+                    "-acodec", "pcm_s16le",
+                    output_path,
+                ]
+                subprocess.run(cmd, check=True)
+                if not self._is_valid_audio_file(output_path):
+                    raise RuntimeError(f"Sliced audio clip is missing or empty: {output_path}")
+
+                audio_data.append(
+                    {
+                        "path": output_path,
+                        "duration": clip_duration,
+                        "section_idx": idx,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "preserve_timing": True,
+                        "source": "master_paragraph",
+                    }
+                )
+            except Exception as exc:
+                logger.error("Failed to slice audio for section %s: %s", idx, exc)
+                audio_data.append(None)
+
+        return audio_data
+
     def _is_valid_audio_file(self, path):
         if not path:
             return False

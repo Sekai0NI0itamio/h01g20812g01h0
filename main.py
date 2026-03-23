@@ -13,9 +13,17 @@ from automation.content_generator import (
     generate_batch_image_prompts,
     generate_comprehensive_content,
     generate_sound_effect_plan,
+    generate_timed_meme_insertion_plan,
+    generate_timed_sound_effect_plan,
+    generate_timed_word_color_plan,
     generate_meme_insertion_plan,
 )
 from helper.audio import AudioHelper
+from helper.shorts_assets import (
+    build_script_sections_from_word_timestamps,
+    build_transcript_text,
+    transcribe_audio_to_word_timestamps,
+)
 from automation.shorts_maker_V import YTShortsCreator_V
 from automation.shorts_maker_I import YTShortsCreator_I
 from automation.thumbnail import ThumbnailGenerator
@@ -94,6 +102,47 @@ def _chunk_text_for_script_beats(text, min_lines=8, max_lines=16):
             lines.append(" ".join(raw_words[i:i + words_per_line]).strip())
 
     return "\n".join([ln for ln in lines if ln]).strip()
+
+
+def _build_image_mode_audio_sections(paragraph, output_dir, safe_title, timestamp):
+    """
+    Generate one narration track, transcribe it with Whisper, then turn the real
+    transcript timings into section metadata and per-section audio clips.
+    """
+    cleaned_paragraph = " ".join(str(paragraph or "").split()).strip()
+    if not cleaned_paragraph:
+        raise ValueError("Paragraph narration is empty for image-mode generation.")
+
+    audio_helper = AudioHelper()
+    paragraph_audio_path = os.path.join(output_dir, f"narration_paragraph_{safe_title}_{timestamp}.wav")
+    created_audio = audio_helper.create_tts_audio(cleaned_paragraph, filename=paragraph_audio_path)
+    if not created_audio:
+        raise RuntimeError("Failed to generate paragraph narration audio for image mode.")
+
+    word_timestamps = transcribe_audio_to_word_timestamps(created_audio)
+    if not word_timestamps:
+        raise RuntimeError("Whisper transcription returned no words for the paragraph narration audio.")
+
+    script_cards = build_script_sections_from_word_timestamps(word_timestamps)
+    if not script_cards:
+        raise RuntimeError("Failed to build timed script sections from Whisper transcription.")
+
+    audio_data = audio_helper.slice_audio_by_sections(
+        created_audio,
+        script_cards,
+        output_prefix=f"{safe_title}_{timestamp}",
+    )
+    if not audio_data or any(item is None for item in audio_data):
+        raise RuntimeError("Failed to slice paragraph narration audio into timed section clips.")
+
+    transcript_text = build_transcript_text(word_timestamps)
+    return {
+        "paragraph_audio_path": created_audio,
+        "word_timestamps": word_timestamps,
+        "transcript_text": transcript_text,
+        "script_cards": script_cards,
+        "audio_data": audio_data,
+    }
 
 
 def _generate_thumbnail_job(output_dir, safe_title, timestamp, title, script_cards, thumbnail_image_prompt, thumbnail_unsplash_query, style):
@@ -182,17 +231,22 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         # Generate unique filename with timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+        if creator_type is None:
+            creator_type = get_creator_for_day()
+        image_mode = isinstance(creator_type, YTShortsCreator_I)
+
         topic = resolve_topic(topic)
         logger.info(f"Generating comprehensive content for : {topic}")
 
-        # Generate all content in a single API call
+        # Generate all content in a single API call.
         content_package = generate_comprehensive_content(
             topic,
             max_tokens=1200,
             source_story_text=source_story_text,
+            paragraph_only=image_mode,
         )
 
-        # Extract content elements
+        # Extract content elements.
         script = content_package["script"]
         paragraph = content_package.get("paragraph", "")
         title = content_package["title"].strip()
@@ -203,7 +257,10 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         logger.info("Content package generated successfully:")
         logger.info(f"Title: {title}")
         logger.info(f"Description length: {len(description)} characters")
-        logger.info("Raw script generated successfully")
+        if image_mode:
+            logger.info("Paragraph narration generated successfully")
+        else:
+            logger.info("Raw script generated successfully")
 
         # Create output filename using the title instead of raw topic
         safe_title = title.replace(' ', '_').replace(':', '').replace('?', '').replace('!', '')[:30]
@@ -231,6 +288,8 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                         "description": description,
                         "thumbnail_hf_prompt": thumbnail_image_prompt,
                         "thumbnail_unsplash_query": thumbnail_unsplash_query,
+                        "paragraph": paragraph,
+                        "script_format": "paragraph" if image_mode else "line_beats",
                     },
                     meta_file,
                     ensure_ascii=False,
@@ -240,32 +299,64 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         except Exception as metadata_write_error:
             logger.warning(f"Failed to save content metadata file: {metadata_write_error}")
 
-        # Optional paragraph narration audio. Disabled by default to avoid duplicate TTS work.
-        generate_paragraph_audio = os.getenv("ENABLE_PARAGRAPH_NARRATION_AUDIO", "false").lower() == "true"
-        if paragraph and generate_paragraph_audio:
+        prebuilt_audio_data = None
+        transcript_payload = None
+        if image_mode:
+            transcript_payload = _build_image_mode_audio_sections(
+                paragraph or script,
+                output_dir=output_dir,
+                safe_title=safe_title,
+                timestamp=timestamp,
+            )
+            script_cards = transcript_payload["script_cards"]
+            prebuilt_audio_data = transcript_payload["audio_data"]
+
             try:
-                audio_helper = AudioHelper()
-                para_audio_path = os.path.join(output_dir, f"narration_paragraph_{safe_title}_{timestamp}.wav")
-                created = audio_helper.create_tts_audio(paragraph, filename=para_audio_path)
-                if created:
-                    logger.info(f"Generated paragraph narration audio: {created}")
-                else:
-                    logger.warning("Failed to generate paragraph narration audio")
-            except Exception as e:
-                logger.exception("Error generating paragraph narration audio: %s", e)
-        elif paragraph:
-            logger.info("Skipping paragraph narration audio generation (ENABLE_PARAGRAPH_NARRATION_AUDIO=false)")
+                transcript_output_filename = f"transcript_{safe_title}_{timestamp}.json"
+                transcript_output_path = os.path.join(output_dir, transcript_output_filename)
+                with open(transcript_output_path, "w", encoding="utf-8") as transcript_file:
+                    json.dump(
+                        {
+                            "title": title,
+                            "paragraph": paragraph or script,
+                            "paragraph_audio_path": transcript_payload["paragraph_audio_path"],
+                            "transcript_text": transcript_payload["transcript_text"],
+                            "sections": script_cards,
+                        },
+                        transcript_file,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                logger.info("Saved Whisper transcript metadata to: %s", transcript_output_path)
+            except Exception as transcript_write_error:
+                logger.warning("Failed to save transcript metadata file: %s", transcript_write_error)
+        else:
+            # Optional paragraph narration audio for non-image mode. Disabled by default to avoid duplicate TTS work.
+            generate_paragraph_audio = os.getenv("ENABLE_PARAGRAPH_NARRATION_AUDIO", "false").lower() == "true"
+            if paragraph and generate_paragraph_audio:
+                try:
+                    audio_helper = AudioHelper()
+                    para_audio_path = os.path.join(output_dir, f"narration_paragraph_{safe_title}_{timestamp}.wav")
+                    created = audio_helper.create_tts_audio(paragraph, filename=para_audio_path)
+                    if created:
+                        logger.info(f"Generated paragraph narration audio: {created}")
+                    else:
+                        logger.warning("Failed to generate paragraph narration audio")
+                except Exception as e:
+                    logger.exception("Error generating paragraph narration audio: %s", e)
+            elif paragraph:
+                logger.info("Skipping paragraph narration audio generation (ENABLE_PARAGRAPH_NARRATION_AUDIO=false)")
 
-        # If script came back too short, derive beat lines from paragraph for better section parallelism.
-        raw_lines = [ln.strip() for ln in str(script or "").splitlines() if ln.strip()]
-        if len(raw_lines) < 4 and paragraph:
-            rebuilt_script = _chunk_text_for_script_beats(paragraph, min_lines=8, max_lines=16)
-            if rebuilt_script:
-                script = rebuilt_script
-                logger.info("Rebuilt short script into %s beat lines from paragraph", len([ln for ln in script.splitlines() if ln.strip()]))
+            # If script came back too short, derive beat lines from paragraph for better section parallelism.
+            raw_lines = [ln.strip() for ln in str(script or "").splitlines() if ln.strip()]
+            if len(raw_lines) < 4 and paragraph:
+                rebuilt_script = _chunk_text_for_script_beats(paragraph, min_lines=8, max_lines=16)
+                if rebuilt_script:
+                    script = rebuilt_script
+                    logger.info("Rebuilt short script into %s beat lines from paragraph", len([ln for ln in script.splitlines() if ln.strip()]))
 
-        # Parse script into cards as before
-        script_cards = parse_script_to_cards(script)
+            script_cards = parse_script_to_cards(script)
+
         logger.info(f"Script parsed into {len(script_cards)} sections")
         for i, card in enumerate(script_cards):
             logger.info(f"Section {i+1}: {card['text'][:30]}... (duration: {card['duration']}s)")
@@ -284,37 +375,87 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                 [f for f in os.listdir(sound_effects_dir) if f.lower().endswith(".mp3")]
             )
 
-        # Build SFX and meme plans concurrently (both are independent AI planning calls)
+        # Build transcript-aware planning for image mode and line-based planning for video mode.
         sfx_plan = []
         meme_plan = []
+        caption_color_map = {}
+        card_texts = [card['text'] for card in script_cards]
+        batch_query_results = {}
         if script_cards:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as planner_pool:
-                sfx_future = None
-                if sound_effect_files:
-                    sfx_future = planner_pool.submit(
-                        generate_sound_effect_plan,
-                        script_lines=[card.get("text", "") for card in script_cards],
-                        sound_effect_files=sound_effect_files,
+            if image_mode:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as planner_pool:
+                    query_future = planner_pool.submit(
+                        generate_batch_image_prompts,
+                        card_texts,
+                        overall_topic=topic,
+                        timed_sections=script_cards,
+                    )
+                    sfx_future = None
+                    if sound_effect_files:
+                        sfx_future = planner_pool.submit(
+                            generate_timed_sound_effect_plan,
+                            script_sections=script_cards,
+                            sound_effect_files=sound_effect_files,
+                            topic=topic,
+                        )
+                    meme_future = planner_pool.submit(
+                        generate_timed_meme_insertion_plan,
+                        script_sections=script_cards,
+                        topic=topic,
+                        min_insertions=5,
+                        max_insertions=11,
+                    )
+                    color_future = planner_pool.submit(
+                        generate_timed_word_color_plan,
+                        script_sections=script_cards,
                         topic=topic,
                     )
 
-                meme_future = planner_pool.submit(
-                    generate_meme_insertion_plan,
-                    script_lines=[card.get("text", "") for card in script_cards],
-                    topic=topic,
-                    min_insertions=5,
-                    max_insertions=11,
-                )
-
-                if sfx_future:
                     try:
-                        sfx_plan = sfx_future.result()
+                        batch_query_results = query_future.result()
                     except Exception as plan_err:
-                        logger.warning("SFX plan generation failed: %s", plan_err)
-                try:
-                    meme_plan = meme_future.result()
-                except Exception as plan_err:
-                    logger.warning("Meme plan generation failed: %s", plan_err)
+                        logger.warning("Image prompt generation failed: %s", plan_err)
+                    if sfx_future:
+                        try:
+                            sfx_plan = sfx_future.result()
+                        except Exception as plan_err:
+                            logger.warning("Timed SFX plan generation failed: %s", plan_err)
+                    try:
+                        meme_plan = meme_future.result()
+                    except Exception as plan_err:
+                        logger.warning("Timed meme plan generation failed: %s", plan_err)
+                    try:
+                        caption_color_map = color_future.result()
+                    except Exception as plan_err:
+                        logger.warning("Timed caption color planning failed: %s", plan_err)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as planner_pool:
+                    sfx_future = None
+                    if sound_effect_files:
+                        sfx_future = planner_pool.submit(
+                            generate_sound_effect_plan,
+                            script_lines=card_texts,
+                            sound_effect_files=sound_effect_files,
+                            topic=topic,
+                        )
+
+                    meme_future = planner_pool.submit(
+                        generate_meme_insertion_plan,
+                        script_lines=card_texts,
+                        topic=topic,
+                        min_insertions=5,
+                        max_insertions=11,
+                    )
+
+                    if sfx_future:
+                        try:
+                            sfx_plan = sfx_future.result()
+                        except Exception as plan_err:
+                            logger.warning("SFX plan generation failed: %s", plan_err)
+                    try:
+                        meme_plan = meme_future.result()
+                    except Exception as plan_err:
+                        logger.warning("Meme plan generation failed: %s", plan_err)
 
         if sound_effect_files and script_cards and sfx_plan:
             for item in sfx_plan:
@@ -332,6 +473,11 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
             )
         else:
             logger.info("No SoundEffects/*.mp3 files found or no script cards; skipping sound effect planning")
+
+        if caption_color_map:
+            for card in script_cards:
+                card["caption_color_map"] = caption_color_map
+            logger.info("Applied timed caption color plan with %s words", len(caption_color_map))
 
         # Meme insertion planning: apply pre-generated plan and fetch images.
         if script_cards and meme_plan:
@@ -378,19 +524,10 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
             style,
         )
 
-        if creator_type is None:
-            creator_type = get_creator_for_day()
-
-        # Generate section-specific queries based on creator type
-        card_texts = [card['text'] for card in script_cards]
-
-        # We still need to generate section-specific queries for each section
-        if isinstance(creator_type, YTShortsCreator_V):
+        # We still need to generate section-specific queries for each section.
+        if not image_mode:
             logger.info("Generating video search queries for each section using AI...")
             batch_query_results = generate_batch_video_queries(card_texts, overall_topic=topic)
-        else:
-            logger.info("Generating image search prompts for each section using AI...")
-            batch_query_results = generate_batch_image_prompts(card_texts, overall_topic=topic)
 
         # Extract queries in order, using a fallback if needed
         default_query = f"abstract {topic}"
@@ -425,7 +562,8 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
             max_duration=max_duration,
             background_queries=section_queries,
             blur_background=False,
-            edge_blur=False
+            edge_blur=False,
+            existing_audio_data=prebuilt_audio_data,
         )
 
         # Resolve thumbnail result from concurrent generation task.

@@ -10,6 +10,7 @@ from automation.scitely_client import (
     create_chat_completion,
     disable_scitely,
     get_default_chat_provider,
+    get_nvidia_api_key,
     is_scitely_disabled,
     get_scitely_api_key,
     get_scitely_model,
@@ -70,6 +71,10 @@ def _load_script_template():
     except OSError as exc:
         logger.warning("Failed to load AI shorts script template from %s: %s", SCRIPT_TEMPLATE_PATH, exc)
         return ""
+
+
+def _has_structured_ai_provider():
+    return bool(get_scitely_api_key() or get_nvidia_api_key())
 
 
 def _parse_json_response(response_content):
@@ -233,7 +238,40 @@ def _rewrite_story_to_immersive_first_person(story_text, model):
     return str(rewritten or "").strip()
 
 
-def _build_story_content_package_prompt(topic, rewritten_story, source_title="", source_link=""):
+def _build_story_content_package_prompt(topic, rewritten_story, source_title="", source_link="", paragraph_only=False):
+    if paragraph_only:
+        return f"""
+    You are creating a complete YouTube Short content package from a rewritten first-person story.
+
+    Topic context: {topic}
+    Source title: {source_title}
+    Source permalink: {source_link}
+
+    Rewritten immersive story:
+    {rewritten_story}
+
+    Return ONE valid JSON object with these exact fields:
+    1) paragraph       -- a single first-person paragraph used as the full narration audio
+    2) title
+    3) description
+    4) thumbnail_hf_prompt
+    5) thumbnail_unsplash_query
+
+    Requirements:
+    - paragraph must be exactly one paragraph with no internal line breaks.
+    - paragraph must be first-person, conversational, emotionally clear, and easy to narrate aloud.
+    - paragraph must use plain, everyday words and avoid literary/descriptive flourish.
+    - paragraph may include minor grammar imperfections if it sounds natural.
+    - paragraph should connect ideas with "and" and avoid commas.
+    - paragraph should end with a comment CTA line such as "Comment what you think about this down in the comments."
+    - do not include labels, bullet points, timestamps, or a separate line-by-line script.
+    - title should be 40-60 characters and click-worthy.
+    - description should be 100-200 characters and include 3-4 hashtags.
+    - thumbnail_hf_prompt should be 20-30 words, focused on concrete scene elements.
+    - thumbnail_unsplash_query should be 2-4 words.
+    - do not output markdown fences or extra keys.
+    """
+
     return f"""
     You are creating a complete YouTube Short content package from a rewritten first-person story.
 
@@ -270,7 +308,7 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
     """
 
 
-def _build_content_package_from_story(topic, story, model, max_tokens, retries):
+def _build_content_package_from_story(topic, story, model, max_tokens, retries, paragraph_only=False):
     if isinstance(story, dict):
         story_body = str(story.get("body", "")).strip()
         source_title = str(story.get("title", "")).strip()
@@ -294,6 +332,7 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries):
                 rewritten_story=rewritten_story,
                 source_title=source_title,
                 source_link=source_link,
+                paragraph_only=paragraph_only,
             )
             response_content = _create_json_completion(
                 prompt=package_prompt,
@@ -303,7 +342,9 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries):
             )
 
             content_package = _parse_json_response(response_content)
-            required_fields = ["paragraph", "script", "title", "description", "thumbnail_hf_prompt", "thumbnail_unsplash_query"]
+            required_fields = ["paragraph", "title", "description", "thumbnail_hf_prompt", "thumbnail_unsplash_query"]
+            if not paragraph_only:
+                required_fields.append("script")
             missing_fields = [field for field in required_fields if field not in content_package]
             if missing_fields:
                 raise ValueError(f"Missing required fields in response: {missing_fields}")
@@ -312,8 +353,11 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries):
             paragraph = _normalize_paragraph_narration_style(content_package.get("paragraph", ""))
             content_package["paragraph"] = paragraph
 
-            # Clean script lines but ensure they are derived from the paragraph
-            content_package["script"] = filter_instructional_labels(content_package["script"]) if "script" in content_package else ""
+            if paragraph_only:
+                content_package["script"] = paragraph
+            else:
+                # Clean script lines but ensure they are derived from the paragraph
+                content_package["script"] = filter_instructional_labels(content_package["script"]) if "script" in content_package else ""
             if source_link:
                 content_package["source_story_permalink"] = source_link
             if source_title:
@@ -392,6 +436,21 @@ def filter_instructional_labels(script):
 
     return filtered_script
 
+
+def _format_timed_sections_for_prompt(script_sections):
+    formatted = []
+    for idx, section in enumerate(script_sections or []):
+        text = re.sub(r"\s+", " ", str(section.get("text", "") or "")).strip()
+        if not text:
+            continue
+        start_time = float(section.get("start_time", 0.0) or 0.0)
+        end_time = float(section.get("end_time", start_time + float(section.get("duration", 0.0) or 0.0)) or start_time)
+        duration = max(0.12, float(section.get("duration", max(0.12, end_time - start_time)) or 0.12))
+        formatted.append(
+            f"--- Section {idx} | start={start_time:.2f}s | end={end_time:.2f}s | duration={duration:.2f}s ---\n{text}"
+        )
+    return "\n\n".join(formatted)
+
 def generate_batch_video_queries(texts: list[str], overall_topic="technology", model=None, retries=3):
     """
     Generate concise video search queries for a batch of script texts using Scitely's DeepSeek models,
@@ -405,8 +464,8 @@ def generate_batch_video_queries(texts: list[str], overall_topic="technology", m
         dict: A dictionary mapping the index (int) of the input text to the generated query string (str).
               Returns an empty dictionary on failure after retries.
     """
-    if not get_scitely_api_key() and get_default_chat_provider() != "nvidia":
-        raise ValueError("Scitely API key is not set. Please set SCITELY_API_KEY in .env.")
+    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
+        raise ValueError("No supported AI provider is configured. Set SCITELY_API_KEY or NVIDIA_API_KEY in .env.")
 
     model = model or get_scitely_model()
 
@@ -480,7 +539,7 @@ def generate_batch_video_queries(texts: list[str], overall_topic="technology", m
     # Fallback: Return empty dict if all retries fail
     return {}
 
-def generate_batch_image_prompts(texts: list[str], overall_topic="technology", model=None, retries=3):
+def generate_batch_image_prompts(texts: list[str], overall_topic="technology", model=None, retries=3, timed_sections=None):
     """
     Generate detailed image generation prompts for a batch of script texts using Scitely's DeepSeek models,
     returning results as a JSON object.
@@ -493,19 +552,23 @@ def generate_batch_image_prompts(texts: list[str], overall_topic="technology", m
         dict: A dictionary mapping the index (int) of the input text to the generated image prompt (str).
               Returns an empty dictionary on failure after retries.
     """
-    if not get_scitely_api_key() and get_default_chat_provider() != "nvidia":
-        raise ValueError("Scitely API key is not set. Please set SCITELY_API_KEY in .env.")
+    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
+        raise ValueError("No supported AI provider is configured. Set SCITELY_API_KEY or NVIDIA_API_KEY in .env.")
 
     model = model or get_scitely_model()
 
     # Prepare the input text part of the prompt
-    formatted_texts = ""
-    for i, text in enumerate(texts):
-        formatted_texts += f"--- Card {i} ---\n{text}\n\n"
+    if timed_sections:
+        formatted_texts = _format_timed_sections_for_prompt(timed_sections)
+    else:
+        formatted_texts = ""
+        for i, text in enumerate(texts):
+            formatted_texts += f"--- Card {i} ---\n{text}\n\n"
 
     prompt = f"""
     You are an assistant that generates high-quality image prompts for AI image generation models like Stable Diffusion.
     Based on the following text sections from a video script about '{overall_topic}', create a detailed image prompt for EACH section.
+    When timestamps are provided, use them as pacing context so each prompt matches the exact beat of the narration.
 
     Input Script Sections:
     {formatted_texts}
@@ -584,8 +647,8 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
     if not script_lines or not sound_effect_files:
         return []
 
-    if not get_scitely_api_key():
-        logger.warning("Scitely API key not available; skipping sound effect planning")
+    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
+        logger.warning("No structured AI provider available; skipping sound effect planning")
         return []
 
     model = model or get_scitely_model()
@@ -717,7 +780,141 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
     return []
 
 
-def _build_fallback_content_package(topic):
+def generate_timed_sound_effect_plan(script_sections, sound_effect_files, topic="", model=None, retries=3):
+    """
+    Ask the LLM to place sound effects on transcript-timed sections.
+
+    offset_seconds remains relative to the chosen section start so the existing
+    renderers can apply it without additional timing changes.
+    """
+    if not script_sections or not sound_effect_files:
+        return []
+
+    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
+        logger.warning("No structured AI provider available; skipping timed sound effect planning")
+        return []
+
+    model = model or get_scitely_model()
+    if is_scitely_disabled():
+        logger.info("Scitely is disabled; timed sound effect planning will use NVIDIA")
+
+    total_sections = len(script_sections)
+    min_required = max(1, math.ceil((total_sections * 2) / 3) - 5)
+    max_effects = total_sections
+
+    formatted_sections = _format_timed_sections_for_prompt(script_sections)
+    formatted_sfx = "\n".join([f"- {name}" for name in sound_effect_files])
+
+    prompt = f"""
+    You are creating a funny sound effect timing plan for a short-form video.
+    Topic: {topic}
+
+    These transcript sections already come from Whisper word timestamps, so the timing is real.
+
+    Transcript sections:
+    {formatted_sections}
+
+    Available sound effect files (use exact file names only):
+    {formatted_sfx}
+
+    Rules:
+    1) Choose at least {min_required} sound effects total, and no more than {max_effects}.
+    2) section_index must reference the numbered section above.
+    3) effect_file must be one of the listed file names exactly.
+    4) offset_seconds is relative to the chosen section start, not absolute video time.
+    5) Use small offsets that fit naturally inside each section's duration.
+    6) Pick moments that feel funny, punchy, awkward, dramatic, or chaotic.
+
+    Return ONLY valid JSON in this shape:
+    {{
+      "effects": [
+        {{"section_index": 0, "effect_file": "filename.mp3", "offset_seconds": 0.25}}
+      ]
+    }}
+    """
+
+    for attempt in range(retries):
+        try:
+            response_content = _create_json_completion(
+                prompt=prompt,
+                model=model,
+                max_tokens=420,
+                temperature=0.5,
+            )
+            parsed = _parse_json_response(response_content)
+            raw_effects = parsed.get("effects", []) if isinstance(parsed, dict) else []
+
+            valid_names = set(sound_effect_files)
+            normalized = []
+            used_sections = set()
+            for item in raw_effects:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    idx = int(item.get("section_index"))
+                except Exception:
+                    continue
+                if idx < 0 or idx >= len(script_sections) or idx in used_sections:
+                    continue
+
+                effect_file = str(item.get("effect_file", "")).strip()
+                if effect_file not in valid_names:
+                    continue
+
+                try:
+                    offset = float(item.get("offset_seconds", 0.0))
+                except Exception:
+                    offset = 0.0
+
+                section_duration = max(0.12, float(script_sections[idx].get("duration", 0.12) or 0.12))
+                offset = max(0.0, min(max(0.0, section_duration - 0.05), offset))
+
+                normalized.append(
+                    {
+                        "line_index": idx,
+                        "effect_file": effect_file,
+                        "offset_seconds": offset,
+                    }
+                )
+                used_sections.add(idx)
+
+            normalized.sort(key=lambda x: x["line_index"])
+            if len(normalized) < min_required:
+                used_sections = {entry["line_index"] for entry in normalized}
+                for idx in range(len(script_sections)):
+                    if len(normalized) >= min_required:
+                        break
+                    if idx in used_sections:
+                        continue
+                    fallback_name = sound_effect_files[len(normalized) % len(sound_effect_files)]
+                    normalized.append(
+                        {
+                            "line_index": idx,
+                            "effect_file": fallback_name,
+                            "offset_seconds": 0.0,
+                        }
+                    )
+                    used_sections.add(idx)
+
+            normalized.sort(key=lambda x: x["line_index"])
+            logger.info("Generated timed sound effect plan with %s entries", len(normalized))
+            return normalized[:max_effects]
+        except Exception as exc:
+            logger.warning(
+                "Timed sound effect planning failed (attempt %s/%s): %s",
+                attempt + 1,
+                retries,
+                exc,
+            )
+            if isinstance(exc, ScitelyAPIError) and getattr(exc, "provider", "") == "scitely":
+                disable_scitely(exc)
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+
+    return []
+
+
+def _build_fallback_content_package(topic, paragraph_only=False):
     clean_topic = re.sub(r"\s+", " ", str(topic or "Artificial Intelligence")).strip()
     if not clean_topic:
         clean_topic = "Artificial Intelligence"
@@ -747,8 +944,11 @@ def _build_fallback_content_package(topic):
         "It still feels close to me.",
     ]
 
+    paragraph = _normalize_paragraph_narration_style(" ".join(script_lines))
+
     return {
-        "script": "\n".join(script_lines),
+        "paragraph": paragraph,
+        "script": paragraph if paragraph_only else "\n".join(script_lines),
         "title": f"{clean_topic[:52]} Story I Could Not Ignore"[:60],
         "description": f"A personal short about {clean_topic}. #shorts #ai #story #viral",
         "thumbnail_hf_prompt": f"Close-up dramatic scene around {clean_topic}, expressive subject, strong contrast, emotional tension, clean composition",
@@ -776,8 +976,8 @@ def generate_meme_insertion_plan(
     if not script_lines:
         return []
 
-    if not get_scitely_api_key() and get_default_chat_provider() != "nvidia":
-        logger.warning("Scitely API key not available; skipping meme insertion planning")
+    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
+        logger.warning("No structured AI provider available; skipping meme insertion planning")
         return []
 
     model = model or get_scitely_model()
@@ -899,7 +1099,229 @@ def generate_meme_insertion_plan(
 
     return []
 
-def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3, source_story_text=None):
+
+def generate_timed_meme_insertion_plan(
+    script_sections,
+    topic="",
+    model=None,
+    retries=3,
+    min_insertions=None,
+    max_insertions=11,
+):
+    """
+    Generate a timed meme insertion plan from Whisper-timed transcript sections.
+    """
+    if not script_sections:
+        return []
+
+    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
+        logger.warning("No structured AI provider available; skipping timed meme planning")
+        return []
+
+    model = model or get_scitely_model()
+    if is_scitely_disabled():
+        logger.info("Scitely is disabled; timed meme insertion planning will use NVIDIA")
+
+    max_effective = max(1, min(int(max_insertions), 11, len(script_sections)))
+    formula_min = math.ceil((len(script_sections) * 2) / 3) - 4
+    requested_min = formula_min if min_insertions is None else int(min_insertions)
+    min_effective = max(1, min(requested_min, max_effective))
+
+    formatted_sections = _format_timed_sections_for_prompt(script_sections)
+    prompt = f"""
+    You are planning meme image insertions for a short-form video.
+    Topic: {topic}
+
+    These transcript sections already come from Whisper timestamps, so use their real timing.
+
+    Transcript sections:
+    {formatted_sections}
+
+    Rules:
+    1) Return between {min_effective} and {max_effective} insertions.
+    2) Use distinct section_index values.
+    3) query must be short, searchable, and meme-friendly (2-6 words).
+    4) offset_seconds is relative to the section start.
+    5) duration_seconds must fit inside that section.
+    6) Prefer funny reaction images, awkward reaction faces, chaotic memes, or iconic visual jokes that match the beat.
+
+    Return ONLY valid JSON in this exact shape:
+    {{
+      "insertions": [
+        {{"section_index": 1, "query": "surprised pikachu meme", "offset_seconds": 0.3, "duration_seconds": 1.4}}
+      ]
+    }}
+    """
+
+    for attempt in range(retries):
+        try:
+            response_content = _create_json_completion(
+                prompt=prompt,
+                model=model,
+                max_tokens=650,
+                temperature=0.5,
+            )
+            parsed = _parse_json_response(response_content)
+            raw_insertions = parsed.get("insertions", []) if isinstance(parsed, dict) else []
+
+            normalized = []
+            used_sections = set()
+            for item in raw_insertions:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    section_index = int(item.get("section_index"))
+                except Exception:
+                    continue
+                if section_index < 0 or section_index >= len(script_sections) or section_index in used_sections:
+                    continue
+
+                query = str(item.get("query", "")).strip()
+                if not query:
+                    continue
+
+                section_duration = max(0.12, float(script_sections[section_index].get("duration", 0.12) or 0.12))
+                try:
+                    offset_seconds = float(item.get("offset_seconds", 0.0))
+                except Exception:
+                    offset_seconds = 0.0
+                try:
+                    duration_seconds = float(item.get("duration_seconds", 1.0))
+                except Exception:
+                    duration_seconds = 1.0
+
+                offset_seconds = max(0.0, min(max(0.0, section_duration - 0.1), offset_seconds))
+                remaining = max(0.25, section_duration - offset_seconds)
+                duration_seconds = max(0.25, min(remaining, duration_seconds))
+
+                normalized.append(
+                    {
+                        "line_index": section_index,
+                        "query": query,
+                        "offset_seconds": offset_seconds,
+                        "duration_seconds": duration_seconds,
+                    }
+                )
+                used_sections.add(section_index)
+
+            normalized.sort(key=lambda x: x["line_index"])
+            if len(normalized) < min_effective:
+                used = {entry["line_index"] for entry in normalized}
+                for idx, section in enumerate(script_sections):
+                    if len(normalized) >= min_effective:
+                        break
+                    if idx in used:
+                        continue
+                    fallback_query = " ".join(str(section.get("text", "")).split()[:6]).strip() or "funny reaction meme"
+                    fallback_duration = min(3.0, max(0.25, float(section.get("duration", 3.0) or 3.0)))
+                    normalized.append(
+                        {
+                            "line_index": idx,
+                            "query": fallback_query,
+                            "offset_seconds": 0.2,
+                            "duration_seconds": fallback_duration,
+                        }
+                    )
+                    used.add(idx)
+
+            normalized.sort(key=lambda x: x["line_index"])
+            logger.info("Generated timed meme insertion plan with %s entries", len(normalized))
+            return normalized[:max_effective]
+        except Exception as exc:
+            logger.warning(
+                "Timed meme planning failed (attempt %s/%s): %s",
+                attempt + 1,
+                retries,
+                exc,
+            )
+            if isinstance(exc, ScitelyAPIError) and getattr(exc, "provider", "") == "scitely":
+                disable_scitely(exc)
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+
+    return []
+
+
+def generate_timed_word_color_plan(script_sections, topic="", model=None, retries=3):
+    """
+    Ask the LLM which transcript words deserve custom highlight colors.
+    """
+    if not script_sections:
+        return {}
+
+    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
+        logger.warning("No structured AI provider available; skipping timed word color planning")
+        return {}
+
+    model = model or get_scitely_model()
+    if is_scitely_disabled():
+        logger.info("Scitely is disabled; timed word color planning will use NVIDIA")
+
+    formatted_sections = _format_timed_sections_for_prompt(script_sections)
+    prompt = f"""
+    You are selecting colored highlight words for short-video captions.
+    Topic: {topic}
+
+    These sections already come from Whisper timestamps.
+
+    Transcript sections:
+    {formatted_sections}
+
+    Rules:
+    1) Pick up to 18 single words that actually appear in the transcript.
+    2) Focus on emotionally important, funny, dramatic, awkward, or surprising words.
+    3) Use only hex colors in #RRGGBB format.
+    4) Return lower-case words only.
+    5) Do not return phrases.
+
+    Return ONLY valid JSON in this exact shape:
+    {{
+      "colors": {{
+        "beautiful": "#FFD54F",
+        "war": "#FF8A80"
+      }}
+    }}
+    """
+
+    for attempt in range(retries):
+        try:
+            response_content = _create_json_completion(
+                prompt=prompt,
+                model=model,
+                max_tokens=320,
+                temperature=0.4,
+            )
+            parsed = _parse_json_response(response_content)
+            raw = parsed.get("colors", {}) if isinstance(parsed, dict) else {}
+            result = {}
+            transcript_words = {
+                str(word).strip().lower()
+                for section in script_sections
+                for word in re.findall(r"[A-Za-z0-9']+", str(section.get("text", "") or ""))
+                if str(word).strip()
+            }
+            for word, hex_color in raw.items():
+                key = str(word or "").strip().lower()
+                value = str(hex_color or "").strip()
+                if key and key in transcript_words and re.match(r"^#[0-9A-Fa-f]{6}$", value):
+                    result[key] = value
+            logger.info("Generated timed caption color plan with %s entries", len(result))
+            return result
+        except Exception as exc:
+            logger.warning(
+                "Timed word color planning failed (attempt %s/%s): %s",
+                attempt + 1,
+                retries,
+                exc,
+            )
+            if isinstance(exc, ScitelyAPIError) and getattr(exc, "provider", "") == "scitely":
+                disable_scitely(exc)
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+
+    return {}
+
+def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3, source_story_text=None, paragraph_only=False):
     """
     Generate a comprehensive content package for a YouTube Short in a single API call.
 
@@ -917,9 +1339,8 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
             - thumbnail_hf_prompt: Detailed prompt for downstream image selection
             - thumbnail_unsplash_query: Simple query for Unsplash image search
     """
-    if not get_scitely_api_key():
-        if get_default_chat_provider() != "nvidia":
-            raise ValueError("Scitely API key is not set. Please set SCITELY_API_KEY in .env.")
+    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
+        raise ValueError("No supported AI provider is configured. Set SCITELY_API_KEY or NVIDIA_API_KEY in .env.")
 
     model = model or get_scitely_model()
     if is_scitely_disabled():
@@ -934,6 +1355,7 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
             model=model,
             max_tokens=max_tokens,
             retries=retries,
+            paragraph_only=paragraph_only,
         )
         if package:
             return package
@@ -944,7 +1366,51 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
     current_date = datetime.now().strftime("%Y-%m-%d")
     script_template = _load_script_template()
 
-    prompt = f"""
+    if paragraph_only:
+        prompt = f"""
+    Create a complete content package for a YouTube Short about this topic: "{topic}"
+    Date: {current_date}
+
+    House script template:
+    {script_template}
+
+    Narrative style rules to follow strictly:
+    - Write in first person singular (I, me, my).
+    - Use modern, simple English that a 12-16 year old can easily understand.
+    - Keep it natural and conversational, like one person directly talking.
+    - Tell a personal experience story as if I went through it.
+    - Build the story from the user topic only.
+    - Avoid decorative wording, metaphors, and exaggerated hype.
+    - Do not give tips, steps, advice, or "how-to" instructions.
+
+    Provide ALL the following elements in a single JSON response:
+
+    1. "paragraph": One single paragraph that:
+       - Is the full narration script for text-to-speech
+       - Has no internal line breaks
+       - Starts directly on the topic
+       - Is written in first person and sounds like natural speech
+       - Uses simple, clear wording for young teens (12-16)
+       - DOES NOT include labels like "Hook:", "Intro:", etc.
+       - DOES NOT include tips, advice, steps, or list formats
+       - DOES NOT include a presenter intro or title readout
+       - DOES NOT use external citations, statistics, or quotes
+       - Ends with a comment CTA sentence
+
+    2. "title": A catchy, engaging title for the YouTube Short (40-60 characters)
+
+    3. "description": A compelling video description (100-200 characters)
+       - Includes 3-4 relevant hashtags
+
+    4. "thumbnail_hf_prompt": A detailed image prompt for AI image generation (20-30 words)
+       - Focus on WHAT should be in the image, not HOW it should be rendered
+
+    5. "thumbnail_unsplash_query": A simple 2-4 word query for searching stock photos
+
+    Format the response as a valid JSON object with these exact field names.
+    """
+    else:
+        prompt = f"""
     Create a complete content package for a YouTube Short about this topic: "{topic}"
     Date: {current_date}
 
@@ -1012,19 +1478,31 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
                 content_package = _parse_json_response(response_content)
 
                 # Check if all required fields are present
-                required_fields = ["script", "title", "description", "thumbnail_hf_prompt", "thumbnail_unsplash_query"]
+                required_fields = ["title", "description", "thumbnail_hf_prompt", "thumbnail_unsplash_query"]
+                if paragraph_only:
+                    required_fields.append("paragraph")
+                else:
+                    required_fields.append("script")
                 missing_fields = [field for field in required_fields if field not in content_package]
 
                 if missing_fields:
                     logger.warning(f"JSON response missing required fields: {missing_fields}")
                     raise ValueError(f"Missing required fields in response: {missing_fields}")
 
-                # Clean the script text of any remaining instructional labels
-                content_package["script"] = filter_instructional_labels(content_package["script"])
+                if paragraph_only:
+                    paragraph = _normalize_paragraph_narration_style(content_package.get("paragraph", ""))
+                    content_package["paragraph"] = paragraph
+                    content_package["script"] = paragraph
+                else:
+                    # Clean the script text of any remaining instructional labels
+                    content_package["script"] = filter_instructional_labels(content_package["script"])
 
                 logger.info(f"Successfully generated comprehensive content package:")
                 logger.info(f"Title: {content_package['title']}")
-                logger.info(f"Script length: {len([ln for ln in str(content_package['script']).splitlines() if ln.strip()])} lines")
+                if paragraph_only:
+                    logger.info(f"Paragraph length: {len(str(content_package['paragraph']).split())} words")
+                else:
+                    logger.info(f"Script length: {len([ln for ln in str(content_package['script']).splitlines() if ln.strip()])} lines")
                 logger.info(f"Thumbnail image prompt: {content_package['thumbnail_hf_prompt'][:50]}...")
                 logger.info(f"Thumbnail Unsplash query: {content_package['thumbnail_unsplash_query']}")
 
@@ -1058,7 +1536,7 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
         topic,
         retries,
     )
-    return _build_fallback_content_package(topic)
+    return _build_fallback_content_package(topic, paragraph_only=paragraph_only)
 
 if __name__ == "__main__": # This is used to run the script directly for testing
     # Example usage for batch query generation

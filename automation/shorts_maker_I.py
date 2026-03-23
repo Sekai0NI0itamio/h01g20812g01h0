@@ -130,7 +130,8 @@ class YTShortsCreator_I:
     @measure_time
     def create_youtube_short(self, title, script_sections, background_query="abstract background",
                             output_filename=None, add_captions=False, style="image", voice_style=None, max_duration=25,
-                            background_queries=None, blur_background=False, edge_blur=False, add_watermark_text=None):
+                            background_queries=None, blur_background=False, edge_blur=False, add_watermark_text=None,
+                            existing_audio_data=None):
         """
         Create a YouTube Short with the given script sections.
 
@@ -147,6 +148,7 @@ class YTShortsCreator_I:
             blur_background (bool): Whether to apply blur effect to background images
             edge_blur (bool): Whether to apply edge blur to background images
             add_watermark_text (str): Text to use as watermark (None for no watermark)
+            existing_audio_data (list): Optional pre-generated audio data aligned to script_sections
 
         Returns:
             str: Output file path
@@ -206,6 +208,9 @@ class YTShortsCreator_I:
                 return images_by_query
 
             def generate_audio_task():
+                if existing_audio_data:
+                    logger.info("Using existing audio data for image-mode render")
+                    return existing_audio_data
                 logger.info("Generating audio clips in parallel")
                 return self.audio_helper.process_audio_for_script(
                     script_sections=script_sections,
@@ -289,8 +294,9 @@ class YTShortsCreator_I:
                         spoken_duration = audio_clip.duration
                         audio_clip.close()
 
-                        # Apply explicit pause between adjacent spoken lines.
-                        actual_duration = spoken_duration + (inter_section_gap if i < len(script_sections) - 1 else 0.0)
+                        preserve_timing = bool(audio_section.get("preserve_timing")) if isinstance(audio_section, dict) else False
+                        gap_after = 0.0 if preserve_timing else (inter_section_gap if i < len(script_sections) - 1 else 0.0)
+                        actual_duration = spoken_duration + gap_after
                         
                         # Store actual audio duration for this section
                         audio_durations[i] = actual_duration
@@ -304,7 +310,7 @@ class YTShortsCreator_I:
                                 "Section %s spoken audio %.2fs (+%.2fs gap) => %.2fs used instead of script duration %.2fs",
                                 i,
                                 spoken_duration,
-                                inter_section_gap if i < len(script_sections) - 1 else 0.0,
+                                gap_after,
                                 actual_duration,
                                 expected_duration,
                             )

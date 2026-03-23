@@ -206,8 +206,9 @@ class YTShortsCreator_V:
                         spoken_duration = audio_clip.duration
                         audio_clip.close()
 
-                        # Apply explicit pause between adjacent spoken lines.
-                        actual_duration = spoken_duration + (inter_section_gap if i < len(script_sections) - 1 else 0.0)
+                        preserve_timing = bool(audio_section.get("preserve_timing")) if isinstance(audio_section, dict) else False
+                        gap_after = 0.0 if preserve_timing else (inter_section_gap if i < len(script_sections) - 1 else 0.0)
+                        actual_duration = spoken_duration + gap_after
                         
                         # Store actual audio duration for this section
                         audio_durations[i] = actual_duration
@@ -221,7 +222,7 @@ class YTShortsCreator_V:
                                 "Section %s spoken audio %.2fs (+%.2fs gap) => %.2fs used instead of script duration %.2fs",
                                 i,
                                 spoken_duration,
-                                inter_section_gap if i < len(script_sections) - 1 else 0.0,
+                                gap_after,
                                 actual_duration,
                                 expected_duration,
                             )

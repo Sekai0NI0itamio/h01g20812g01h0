@@ -5,6 +5,7 @@ import subprocess
 import json
 import re
 import tempfile
+import math
 
 from moviepy import (
     AudioFileClip,
@@ -402,6 +403,172 @@ def _chunk_words_with_timestamps(words, fast_mode=False, max_chunks=18):
     return timeline
 
 
+def transcribe_audio_to_word_timestamps(audio_path):
+    """
+    Transcribe an audio file with faster-whisper and return timestamped words.
+    Returns an empty list if ASR is unavailable or transcription fails.
+    """
+    if not audio_path or not os.path.exists(audio_path):
+        return []
+
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        logger.info("faster-whisper unavailable for audio transcription: %s", exc)
+        return []
+
+    model_size = os.getenv("AUTO_CAPTIONS_WHISPER_MODEL", "tiny")
+    device = os.getenv("AUTO_CAPTIONS_WHISPER_DEVICE", "cpu")
+    compute_type = os.getenv("AUTO_CAPTIONS_WHISPER_COMPUTE_TYPE", "int8")
+
+    try:
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        segments, _ = model.transcribe(
+            audio_path,
+            word_timestamps=True,
+            vad_filter=True,
+            beam_size=1,
+        )
+    except Exception as exc:
+        logger.warning("Audio transcription failed for %s: %s", audio_path, exc)
+        return []
+
+    words = []
+    for seg in segments:
+        for word in (getattr(seg, "words", None) or []):
+            raw_word = str(getattr(word, "word", "") or "").strip()
+            if not raw_word:
+                continue
+            start = float(getattr(word, "start", 0.0) or 0.0)
+            end = float(getattr(word, "end", start) or start)
+            words.append(
+                {
+                    "start": start,
+                    "end": max(start, end),
+                    "word": raw_word,
+                }
+            )
+
+    if words:
+        logger.info("Transcribed %s words from %s", len(words), os.path.basename(audio_path))
+    return words
+
+
+def build_transcript_text(words):
+    return " ".join(str(item.get("word", "")).strip() for item in words if str(item.get("word", "")).strip()).strip()
+
+
+def build_script_sections_from_word_timestamps(
+    words,
+    *,
+    min_chunks=8,
+    max_chunks=16,
+    min_words_per_chunk=4,
+    max_words_per_chunk=9,
+):
+    """
+    Turn Whisper word timestamps into timed script sections for image/video planning.
+    """
+    if not words:
+        return []
+
+    cleaned_words = []
+    for item in words:
+        token = str(item.get("word", "") or "").strip()
+        if not token:
+            continue
+        start = float(item.get("start", 0.0) or 0.0)
+        end = float(item.get("end", start) or start)
+        cleaned_words.append(
+            {
+                "start": start,
+                "end": max(start, end),
+                "word": token,
+            }
+        )
+
+    if not cleaned_words:
+        return []
+
+    total_words = len(cleaned_words)
+    desired_chunks = max(min_chunks, min(max_chunks, int(round(total_words / 6.0)) or 1))
+    chunk_size = int(math.ceil(total_words / desired_chunks))
+    chunk_size = max(min_words_per_chunk, min(max_words_per_chunk, chunk_size))
+
+    grouped_words = []
+    cursor = 0
+    while cursor < total_words:
+        remaining = total_words - cursor
+        remaining_groups = max(1, desired_chunks - len(grouped_words))
+        take = int(math.ceil(remaining / remaining_groups))
+        take = max(1, min(chunk_size, take, max_words_per_chunk))
+        group = cleaned_words[cursor:cursor + take]
+
+        # Avoid a tiny trailing fragment by merging it into the current section.
+        trailing = total_words - (cursor + take)
+        if 0 < trailing < min_words_per_chunk and (cursor + take) < total_words:
+            group = cleaned_words[cursor:cursor + take + trailing]
+            take += trailing
+
+        grouped_words.append(group)
+        cursor += take
+
+    sections = []
+    for idx, group in enumerate(grouped_words):
+        if not group:
+            continue
+
+        start = float(group[0].get("start", 0.0) or 0.0)
+        end = float(group[-1].get("end", start) or start)
+        text = " ".join(str(word.get("word", "")).strip() for word in group).strip()
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            continue
+
+        sections.append(
+            {
+                "id": f"transcript_section_{idx}",
+                "text": text,
+                "duration": max(0.12, end - start),
+                "voice_style": "male",
+                "speaker": "boy",
+                "start_time": start,
+                "end_time": end,
+                "word_timestamps": group,
+            }
+        )
+
+    if sections:
+        logger.info("Built %s timed script sections from Whisper transcript", len(sections))
+    return sections
+
+
+def _build_caption_timeline_from_section_words(script_sections):
+    fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
+    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "18")))
+    words = []
+    for section in script_sections or []:
+        for item in section.get("word_timestamps", []) or []:
+            token = str(item.get("word", "") or "").strip()
+            if not token:
+                continue
+            words.append(
+                {
+                    "start": float(item.get("start", 0.0) or 0.0),
+                    "end": float(item.get("end", 0.0) or 0.0),
+                    "word": token,
+                }
+            )
+
+    if not words:
+        return []
+
+    timeline = _chunk_words_with_timestamps(words, fast_mode=fast_mode, max_chunks=max_chunks)
+    if timeline:
+        logger.info("Built caption timeline from precomputed transcript words (%s chunks)", len(timeline))
+    return timeline
+
+
 def _build_caption_timeline_from_audio(video_path):
     """
     Build caption timeline from real ASR timestamps using faster-whisper (free/open source).
@@ -409,18 +576,6 @@ def _build_caption_timeline_from_audio(video_path):
     """
     if not video_path or not os.path.exists(video_path):
         return []
-
-    try:
-        from faster_whisper import WhisperModel
-    except Exception as exc:
-        logger.info("faster-whisper unavailable for audio-timed captions: %s", exc)
-        return []
-
-    fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
-    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "18")))
-    model_size = os.getenv("AUTO_CAPTIONS_WHISPER_MODEL", "tiny")
-    device = os.getenv("AUTO_CAPTIONS_WHISPER_DEVICE", "cpu")
-    compute_type = os.getenv("AUTO_CAPTIONS_WHISPER_COMPUTE_TYPE", "int8")
 
     fd, wav_path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
@@ -437,26 +592,9 @@ def _build_caption_timeline_from_audio(video_path):
         ]
         subprocess.run(cmd, check=True)
 
-        model = WhisperModel(model_size, device=device, compute_type=compute_type)
-        segments, _ = model.transcribe(
-            wav_path,
-            word_timestamps=True,
-            vad_filter=True,
-            beam_size=1,
-        )
-
-        words = []
-        for seg in segments:
-            for w in (getattr(seg, "words", None) or []):
-                if w and getattr(w, "word", "").strip():
-                    words.append(
-                        {
-                            "start": float(getattr(w, "start", 0.0) or 0.0),
-                            "end": float(getattr(w, "end", 0.0) or 0.0),
-                            "word": str(getattr(w, "word", "")).strip(),
-                        }
-                    )
-
+        fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
+        max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "18")))
+        words = transcribe_audio_to_word_timestamps(wav_path)
         timeline = _chunk_words_with_timestamps(words, fast_mode=fast_mode, max_chunks=max_chunks)
         if timeline:
             logger.info("Built caption timeline from audio timestamps (%s chunks)", len(timeline))
@@ -519,6 +657,20 @@ def _get_gpt_caption_colors(script_sections):
         return {}
 
 
+def _extract_preplanned_caption_colors(script_sections):
+    color_map = {}
+    for section in script_sections or []:
+        raw_map = section.get("caption_color_map")
+        if not isinstance(raw_map, dict):
+            continue
+        for word, hex_color in raw_map.items():
+            key = str(word or "").strip().lower()
+            value = str(hex_color or "").strip()
+            if key and HEX_COLOR_RE.match(value):
+                color_map[key] = value
+    return color_map
+
+
 def add_dynamic_auto_captions_to_video(
     video_path,
     script_sections,
@@ -541,9 +693,11 @@ def add_dynamic_auto_captions_to_video(
         logger.error("Dynamic caption dependencies unavailable: %s", exc)
         return video_path
 
-    # Prefer real audio-based timestamps when possible; fallback to section-duration estimation.
+    # Prefer precomputed transcript timestamps, then real audio-based timestamps, then duration estimation.
+    timeline = _build_caption_timeline_from_section_words(script_sections)
     use_audio_timestamps = os.getenv("AUTO_CAPTIONS_USE_AUDIO_TIMESTAMPS", "true").lower() == "true"
-    timeline = _build_caption_timeline_from_audio(video_path) if use_audio_timestamps else []
+    if not timeline and use_audio_timestamps:
+        timeline = _build_caption_timeline_from_audio(video_path)
     if not timeline:
         timeline = _build_caption_timeline(script_sections)
     if not timeline:
@@ -551,7 +705,9 @@ def add_dynamic_auto_captions_to_video(
         return video_path
 
     fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
-    color_map = {} if fast_mode else _get_gpt_caption_colors(script_sections)
+    color_map = _extract_preplanned_caption_colors(script_sections)
+    if not color_map and not fast_mode:
+        color_map = _get_gpt_caption_colors(script_sections)
     palette = ["#FFD54F", "#4FC3F7", "#FF8A80", "#A5D6A7", "#CE93D8", "#FFB74D"]
 
     base_clip = None
