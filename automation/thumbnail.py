@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from helper.minor_helper import cleanup_temp_directories
 from helper.network import create_requests_session
 from helper.shorts_assets import get_default_font_path
-from helper.image import fetch_image_from_duckduckgo, get_unsplash_api_key
+from helper.image import fetch_best_image_for_prompt, fetch_image_from_duckduckgo, get_unsplash_api_key
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -106,6 +106,25 @@ def _save_g4f_image_item(item, destination):
         return
 
     raise RuntimeError("g4f returned an image item without b64_json or url.")
+
+
+def _wrap_text_to_width(draw, text, font, max_width):
+    words = [word for word in str(text or "").split() if word]
+    if not words:
+        return ""
+
+    lines = []
+    current_line = words[0]
+    for word in words[1:]:
+        candidate = f"{current_line} {word}"
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            current_line = candidate
+        else:
+            lines.append(current_line)
+            current_line = word
+    lines.append(current_line)
+    return "\n".join(lines)
 
 # Timer function for performance monitoring
 def measure_time(func):
@@ -362,6 +381,33 @@ class ThumbnailGenerator:
             return "dramatic anime thumbnail scene with a strong emotional reaction"
         return ". ".join(prompt_parts)
 
+    def build_thumbnail_meme_query(self, title, prompt=None):
+        combined = f"{title or ''} {prompt or ''}".lower()
+        if any(keyword in combined for keyword in ["angry", "furious", "slam", "fight", "war", "chaos"]):
+            return "shocked reaction meme"
+        if any(keyword in combined for keyword in ["side eye", "awkward", "embarrass", "cringe"]):
+            return "side eye meme"
+        if any(keyword in combined for keyword in ["cute", "crush", "beauty", "flirt", "blush"]):
+            return "blushing reaction meme"
+        if any(keyword in combined for keyword in ["confused", "wonder", "comment", "think"]):
+            return "confused reaction meme"
+        return "funny reaction meme"
+
+    def fetch_thumbnail_meme_image(self, title, prompt=None):
+        meme_query = self.build_thumbnail_meme_query(title, prompt)
+        try:
+            meme_path = fetch_best_image_for_prompt(
+                meme_query,
+                style="meme reaction image",
+                allow_ai_fallback=True,
+            )
+            if meme_path:
+                logger.info("Fetched thumbnail meme image for query: %s", meme_query)
+                return meme_path
+        except Exception as exc:
+            logger.warning("Failed to fetch thumbnail meme image for '%s': %s", meme_query, exc)
+        return None
+
     def build_g4f_thumbnail_prompt(self, prompt, style="photorealistic", has_reference_image=True):
         """Convert the AI thumbnail description into a generation-ready image prompt."""
         clean_prompt = " ".join(str(prompt or "").split()).strip()
@@ -502,7 +548,7 @@ class ThumbnailGenerator:
         return raw_output_path
 
     @measure_time
-    def create_thumbnail(self, title, image_path, output_path=None, anime_image_path=None):
+    def create_thumbnail(self, title, image_path, output_path=None, anime_image_path=None, meme_image_path=None):
         """
         Create a thumbnail with text overlay using the given image
 
@@ -526,138 +572,120 @@ class ThumbnailGenerator:
             img = Image.open(image_path)
             logger.info(f"Base image size: {img.size}")
 
-            # resize to YouTube thumbnail dimensions
-            img = img.resize(self.thumbnail_size, Image.LANCZOS)
-            logger.info(f"resized image to YouTube thumbnail dimensions: {self.thumbnail_size}")
+            # Normalize to YouTube thumbnail dimensions.
+            img = ImageOps.fit(img.convert("RGBA"), self.thumbnail_size, method=Image.LANCZOS, centering=(0.5, 0.5))
+            logger.info(f"Normalized image to YouTube thumbnail dimensions: {self.thumbnail_size}")
 
-            # Convert to RGBA to support transparency for overlay
-            img = img.convert("RGBA")
-
-            # Create a semi-transparent dark overlay for better text visibility
+            # Create layered gradients for title and meme readability.
             overlay = Image.new('RGBA', self.thumbnail_size, (0, 0, 0, 0))
             overlay_draw = ImageDraw.Draw(overlay)
-
-            # Draw a gradient overlay (darker at bottom)
-            for y in range(self.thumbnail_size[1] // 2, self.thumbnail_size[1]):
-                # Calculate alpha based on y position (more transparent at top, more opaque at bottom)
-                alpha = int(180 * (y - self.thumbnail_size[1] // 2) / (self.thumbnail_size[1] // 2))
+            top_fade_height = int(self.thumbnail_size[1] * 0.22)
+            for y in range(top_fade_height):
+                alpha = int(70 * (1 - (y / max(1, top_fade_height))))
+                overlay_draw.line([(0, y), (self.thumbnail_size[0], y)], fill=(0, 0, 0, alpha))
+            bottom_start = int(self.thumbnail_size[1] * 0.48)
+            for y in range(bottom_start, self.thumbnail_size[1]):
+                alpha = int(205 * ((y - bottom_start) / max(1, self.thumbnail_size[1] - bottom_start)))
                 overlay_draw.line([(0, y), (self.thumbnail_size[0], y)], fill=(0, 0, 0, alpha))
 
             # Composite the image with the overlay
             img = Image.alpha_composite(img, overlay)
             logger.info("Added gradient overlay to thumbnail")
 
-            # Add anime character overlay (foreground card) if available
-            if anime_image_path and os.path.exists(anime_image_path):
+            # Add meme image at the top middle.
+            if meme_image_path and os.path.exists(meme_image_path):
                 try:
-                    anime_img = Image.open(anime_image_path).convert("RGBA")
-                    target_h = int(self.thumbnail_size[1] * 0.55)
-                    ratio = target_h / max(1, anime_img.height)
-                    target_w = int(anime_img.width * ratio)
-                    anime_img = anime_img.resize((target_w, target_h), Image.LANCZOS)
+                    meme_img = Image.open(meme_image_path).convert("RGBA")
+                    max_size = (int(self.thumbnail_size[0] * 0.34), int(self.thumbnail_size[1] * 0.2))
+                    meme_img.thumbnail(max_size, Image.LANCZOS)
 
-                    # Create a rounded rectangle mask for cleaner composition.
-                    mask = Image.new("L", anime_img.size, 0)
+                    mask = Image.new("L", meme_img.size, 0)
                     mask_draw = ImageDraw.Draw(mask)
                     mask_draw.rounded_rectangle(
-                        [(0, 0), (anime_img.size[0] - 1, anime_img.size[1] - 1)],
+                        [(0, 0), (meme_img.size[0] - 1, meme_img.size[1] - 1)],
+                        radius=26,
+                        fill=255,
+                    )
+                    meme_img.putalpha(mask)
+
+                    border = Image.new("RGBA", (meme_img.width + 10, meme_img.height + 10), (0, 0, 0, 0))
+                    border_mask = Image.new("L", border.size, 0)
+                    border_draw = ImageDraw.Draw(border_mask)
+                    border_draw.rounded_rectangle(
+                        [(0, 0), (border.size[0] - 1, border.size[1] - 1)],
                         radius=30,
                         fill=255,
                     )
-                    anime_img.putalpha(mask)
+                    border.paste((255, 255, 255, 240), (0, 0), border_mask)
+                    border.paste(meme_img, (5, 5), meme_img)
 
-                    # Position at lower-right with margin.
-                    margin = 40
-                    x = self.thumbnail_size[0] - anime_img.width - margin
-                    y = self.thumbnail_size[1] - anime_img.height - 220
-
-                    # Shadow behind anime card.
-                    shadow = Image.new("RGBA", anime_img.size, (0, 0, 0, 140)).filter(ImageFilter.GaussianBlur(10))
+                    x = (self.thumbnail_size[0] - border.width) // 2
+                    y = 60
+                    shadow = Image.new("RGBA", border.size, (0, 0, 0, 155)).filter(ImageFilter.GaussianBlur(14))
                     img.paste(shadow, (x + 8, y + 10), shadow)
-                    img.paste(anime_img, (x, y), anime_img)
-                    logger.info("Added anime character overlay to thumbnail")
+                    img.paste(border, (x, y), border)
+                    logger.info("Added meme overlay to thumbnail")
                 except Exception as e:
-                    logger.warning(f"Failed to overlay anime character image: {e}")
+                    logger.warning(f"Failed to overlay meme image: {e}")
 
-            # Add title text
+            # Add title text.
             draw = ImageDraw.Draw(img)
 
-            # Try to load the font, use default if fails
+            # Try to load a large font and step down until it fits.
             try:
-                # Calculate appropriate font size based on title length
-                font_size = 70 if len(title) < 30 else 60 if len(title) < 50 else 50
-                logger.info(f"Selected font size: {font_size} based on title length: {len(title)}")
-                font = ImageFont.truetype(self.title_font_path, font_size)
-                logger.info(f"Loaded custom font from: {self.title_font_path}")
+                max_text_width = int(self.thumbnail_size[0] * 0.88)
+                font_size = 112 if len(title) < 28 else 98 if len(title) < 42 else 86 if len(title) < 58 else 74
+                wrapped_text = None
+                font = None
+                while font_size >= 56:
+                    font = ImageFont.truetype(self.title_font_path, font_size)
+                    candidate_text = _wrap_text_to_width(draw, title, font, max_text_width)
+                    bbox = draw.multiline_textbbox((0, 0), candidate_text, font=font, spacing=10, align="center")
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                    if text_width <= max_text_width and text_height <= int(self.thumbnail_size[1] * 0.24):
+                        wrapped_text = candidate_text
+                        break
+                    font_size -= 6
+                if wrapped_text is None:
+                    wrapped_text = textwrap.fill(title, width=18)
+                    bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, spacing=10, align="center")
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                logger.info(f"Selected title font size: {font_size}")
             except Exception as e:
-                # Fallback to default font
                 font = ImageFont.load_default()
+                wrapped_text = textwrap.fill(title, width=18)
+                bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, spacing=8, align="center")
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
                 logger.warning(f"Using default font as custom font could not be loaded: {e}")
 
-            # Wrap text to fit thumbnail width
-            wrapped_text = textwrap.fill(title, width=30)
-            logger.info(f"Wrapped text: '{wrapped_text}'")
-
-            # Calculate text position (centered horizontally, near bottom vertically)
-            text_bbox = draw.textbbox((0, 0), wrapped_text, font=font)
-            text_width = text_bbox[2] - text_bbox[0]
-            text_height = text_bbox[3] - text_bbox[1]
-
             text_x = (self.thumbnail_size[0] - text_width) // 2
-            text_y = self.thumbnail_size[1] - text_height - 50  # 50px from bottom
+            text_y = self.thumbnail_size[1] - text_height - 95
             logger.info(f"Text position calculated: x={text_x}, y={text_y}, width={text_width}, height={text_height}")
 
-            # Draw text shadow/outline for better visibility
-            outline_width = 3
-            for dx, dy in [(dx, dy) for dx in range(-outline_width, outline_width+1, 2)
-                                     for dy in range(-outline_width, outline_width+1, 2)]:
-                draw.text((text_x + dx, text_y + dy), wrapped_text, font=font, fill=(0, 0, 0, 255))
-            logger.info("Added text shadow/outline for visibility")
+            panel_padding_x = 34
+            panel_padding_y = 24
+            panel_box = (
+                text_x - panel_padding_x,
+                text_y - panel_padding_y,
+                text_x + text_width + panel_padding_x,
+                text_y + text_height + panel_padding_y,
+            )
+            draw.rounded_rectangle(panel_box, radius=34, fill=(0, 0, 0, 135))
 
-            # Draw the main text in white
-            draw.text((text_x, text_y), wrapped_text, font=font, fill=(255, 255, 255, 255))
+            draw.multiline_text(
+                (text_x, text_y),
+                wrapped_text,
+                font=font,
+                fill=(255, 255, 255, 255),
+                align="center",
+                spacing=10,
+                stroke_width=8,
+                stroke_fill=(0, 0, 0, 255),
+            )
             logger.info("Added main title text")
-
-            # Add a small "SHORTS" label in the corner
-            shorts_label = "SHORTS"
-            try:
-                shorts_font = ImageFont.truetype(self.title_font_path, 30)
-            except Exception as e:
-                shorts_font = ImageFont.load_default()
-                logger.warning(f"Using default font for SHORTS label due to error: {e}")
-
-            shorts_bbox = draw.textbbox((0, 0), shorts_label, font=shorts_font)
-            shorts_width = shorts_bbox[2] - shorts_bbox[0]
-            shorts_height = shorts_bbox[3] - shorts_bbox[1]
-            logger.info(f"SHORTS label dimensions: width={shorts_width}, height={shorts_height}")
-
-            # Draw rounded rectangle background for SHORTS label
-            label_padding = 10
-            label_x = self.thumbnail_size[0] - shorts_width - label_padding * 2 - 20
-            label_y = 20
-            label_height = shorts_height + 10
-            logger.info(f"SHORTS label position: x={label_x}, y={label_y}, height={label_height}")
-
-            # Draw pill background for "SHORTS" text
-            draw.rectangle(
-                [(label_x, label_y), (label_x + shorts_width + label_padding * 2, label_y + label_height)],
-                fill=(255, 0, 0, 200),
-                outline=(255, 255, 255, 200),
-                width=2  # Make outline more visible
-            )
-            logger.info("Added rectangle background for SHORTS label")
-
-            # Draw SHORTS text - properly centered in the rectangle
-            text_y_offset = (label_height - shorts_height) // 2
-            text_position = (label_x + label_padding, label_y + text_y_offset)
-            logger.info(f"SHORTS text position: {text_position}, y_offset={text_y_offset}")
-            draw.text(
-                text_position,
-                shorts_label,
-                font=shorts_font,
-                fill=(255, 255, 255, 255)
-            )
-            logger.info("Added SHORTS text label")
 
             # Convert back to RGB for saving as JPG
             img = img.convert("RGB")
@@ -677,14 +705,14 @@ class ThumbnailGenerator:
     @measure_time
     def generate_thumbnail(self, title, script_sections=None, prompt=None, style="photorealistic", output_path=None):
         """
-        Main function to generate a text-free thumbnail for a YouTube Short.
+        Main function to generate a finished thumbnail for a YouTube Short.
 
         Args:
             title (str): Title of the short
             script_sections (list): List of script sections for context
             prompt (str): AI-generated thumbnail scene description
             style (str): Visual style for the image prompt
-            output_path (str): Path to save the final thumbnail art
+            output_path (str): Path to save the final thumbnail
 
         Returns:
             str: Path to the generated thumbnail
@@ -699,6 +727,8 @@ class ThumbnailGenerator:
 
         logger.info("Using AI thumbnail description: %s", prompt)
         anime_image_path = self.fetch_anime_character_image()
+        meme_image_path = self.fetch_thumbnail_meme_image(title, prompt)
+        base_art_path = os.path.join(self.temp_dir, f"thumbnail_base_{int(time.time())}_{random.randint(1000, 9999)}.jpg")
 
         try:
             g4f_image_path = asyncio.run(
@@ -708,27 +738,32 @@ class ThumbnailGenerator:
                     style=style,
                 )
             )
-            thumbnail_path = self._save_resized_thumbnail(g4f_image_path, output_path)
-            logger.info("Successfully generated g4f thumbnail at: %s", thumbnail_path)
-            return thumbnail_path
+            self._save_resized_thumbnail(g4f_image_path, base_art_path)
+            logger.info("Successfully generated g4f thumbnail art at: %s", base_art_path)
         except Exception as exc:
             logger.warning("g4f thumbnail generation failed, falling back to image-only composition: %s", exc)
+            image_path = self.fetch_stock_background_image(prompt)
+            if not image_path:
+                logger.warning("Stock background fetch failed. Creating fallback background.")
+                temp_path = os.path.join(self.temp_dir, f"fallback_bg_{int(time.time())}.jpg")
+                Image.new("RGB", self.thumbnail_size, color=(33, 33, 33)).save(temp_path, quality=95)
+                image_path = temp_path
 
-        image_path = self.fetch_stock_background_image(prompt)
-        if not image_path:
-            logger.warning("Stock background fetch failed. Creating fallback background.")
-            temp_path = os.path.join(self.temp_dir, f"fallback_bg_{int(time.time())}.jpg")
-            Image.new("RGB", self.thumbnail_size, color=(33, 33, 33)).save(temp_path, quality=95)
-            image_path = temp_path
+            self.create_thumbnail_image_only(
+                image_path=image_path,
+                output_path=base_art_path,
+                anime_image_path=anime_image_path,
+            )
 
-        thumbnail_path = self.create_thumbnail_image_only(
-            image_path=image_path,
+        thumbnail_path = self.create_thumbnail(
+            title=title,
+            image_path=base_art_path,
             output_path=output_path,
-            anime_image_path=anime_image_path,
+            meme_image_path=meme_image_path,
         )
 
         if thumbnail_path:
-            logger.info("Successfully generated fallback thumbnail at: %s", thumbnail_path)
+            logger.info("Successfully generated final thumbnail at: %s", thumbnail_path)
             return thumbnail_path
 
         logger.error("Failed to generate thumbnail")

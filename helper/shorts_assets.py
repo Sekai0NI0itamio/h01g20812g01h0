@@ -232,8 +232,8 @@ def add_anime_greenscreen_overlay_to_video(
     preset="ultrafast",
 ):
     """
-    Overlay a random green-screen anime clip centered in the 4th quadrant (bottom-right).
-    Default scaling is 20% larger than previous baseline.
+    Overlay a random green-screen anime clip on the left side of the frame.
+    The requested size multiplier is intentionally capped so the overlay stays render-safe.
     """
     if not video_path or not os.path.exists(video_path):
         return video_path
@@ -252,15 +252,18 @@ def add_anime_greenscreen_overlay_to_video(
         if chroma_blend is None
         else float(chroma_blend)
     )
+    requested_multiplier = max(1.0, float(os.getenv("SHORTS_GREENSCREEN_SIZE_MULTIPLIER", "50")))
+    max_height_ratio = max(0.25, min(0.98, float(os.getenv("SHORTS_GREENSCREEN_MAX_HEIGHT_RATIO", "0.92"))))
+    effective_height_ratio = max(0.18, min(max_height_ratio, float(scale_factor) * requested_multiplier))
 
     temp_output = video_path.replace('.mp4', '_with_anime_overlay.mp4')
 
     filter_complex = (
-        f"[1:v][0:v]scale2ref=w=main_w*{float(scale_factor):.4f}:h=main_h*{float(scale_factor):.4f}[anime_s][base];"
+        f"[1:v][0:v]scale2ref=w=-1:h=main_h*{effective_height_ratio:.4f}[anime_s][base];"
         f"[anime_s]chromakey=0x00FF00:{chroma_similarity:.4f}:{chroma_blend:.4f}[anime];"
         f"[base][anime]overlay="
-        f"x='max(0,min(main_w-overlay_w,main_w*0.75-overlay_w/2))':"
-        f"y='max(0,min(main_h-overlay_h,main_h*0.75-overlay_h/2))':"
+        f"x='max(0,min(main_w-overlay_w,main_w*0.03))':"
+        f"y='max(0,min(main_h-overlay_h,main_h-overlay_h-main_h*0.03))':"
         f"shortest=1[outv]"
     )
 
@@ -283,8 +286,10 @@ def add_anime_greenscreen_overlay_to_video(
         subprocess.run(cmd, check=True)
         os.replace(temp_output, video_path)
         logger.info(
-            "Added green-screen anime overlay using %s",
+            "Added green-screen anime overlay using %s (requested_multiplier=%sx effective_height_ratio=%.2f)",
             os.path.basename(overlay_video_path),
+            int(requested_multiplier) if requested_multiplier.is_integer() else requested_multiplier,
+            effective_height_ratio,
         )
         return video_path
     except Exception as exc:
@@ -297,34 +302,38 @@ def add_anime_greenscreen_overlay_to_video(
         return video_path
 
 
-def _chunk_caption_words(words, fast_mode=False):
-    """Build 2-3 word chunks for readable fast captions."""
-    if fast_mode:
-        # Fewer, larger chunks reduce render overhead significantly.
-        chunks = []
-        i = 0
-        while i < len(words):
-            remaining = len(words) - i
-            take = 5 if remaining > 6 else remaining
-            chunks.append(words[i:i + take])
-            i += take
-        return chunks
+def _next_caption_chunk_size(remaining, chunk_index=0, fast_mode=False):
+    """Choose a caption chunk size that stays within the 2-4 word target."""
+    if remaining <= 0:
+        return 0
+    if remaining <= 4:
+        return remaining
 
+    pattern = [4, 3] if fast_mode else [3, 2, 4]
+    take = pattern[chunk_index % len(pattern)]
+    take = max(2, min(4, take))
+
+    # Avoid leaving a dangling one-word chunk at the end.
+    if remaining - take == 1:
+        take = 3 if take == 4 else 2
+
+    return take
+
+
+def _chunk_caption_words(words, fast_mode=False):
+    """Build 2-4 word chunks for readable, punchy captions."""
     chunks = []
     i = 0
-    use_three = True
+    chunk_index = 0
     while i < len(words):
         remaining = len(words) - i
-        if remaining <= 3:
-            take = remaining
-        else:
-            take = 3 if use_three else 2
+        take = _next_caption_chunk_size(remaining, chunk_index=chunk_index, fast_mode=fast_mode)
         if take == 1 and chunks:
             chunks[-1].append(words[i])
             break
         chunks.append(words[i:i + take])
         i += take
-        use_three = not use_three
+        chunk_index += 1
     return chunks
 
 
@@ -373,7 +382,7 @@ def _rebalance_caption_timeline(timeline, max_chunks):
 
 def _build_caption_timeline(script_sections):
     fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
-    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "48")))
+    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "160")))
     timeline = []
     cursor = 0.0
     for section in script_sections or []:
@@ -408,17 +417,20 @@ def _build_caption_timeline(script_sections):
     return _rebalance_caption_timeline(timeline, max_chunks)
 
 
-def _chunk_words_with_timestamps(words, fast_mode=False, max_chunks=48):
+def _chunk_words_with_timestamps(words, fast_mode=False, max_chunks=160):
     """Build caption chunks from timestamped words while preserving exact audio timing."""
     if not words:
         return []
 
-    chunk_target = 5 if fast_mode else 3
     timeline = []
     i = 0
+    chunk_index = 0
     while i < len(words):
-        group = words[i:i + chunk_target]
-        i += chunk_target
+        remaining = len(words) - i
+        take = _next_caption_chunk_size(remaining, chunk_index=chunk_index, fast_mode=fast_mode)
+        group = words[i:i + take]
+        i += take
+        chunk_index += 1
         if not group:
             continue
 
@@ -582,7 +594,7 @@ def build_script_sections_from_word_timestamps(
 
 def _build_caption_timeline_from_section_words(script_sections):
     fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
-    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "48")))
+    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "160")))
     words = []
     for section in script_sections or []:
         for item in section.get("word_timestamps", []) or []:
@@ -630,7 +642,7 @@ def _build_caption_timeline_from_audio(video_path):
         subprocess.run(cmd, check=True)
 
         fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
-        max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "48")))
+        max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "160")))
         words = transcribe_audio_to_word_timestamps(wav_path)
         timeline = _chunk_words_with_timestamps(words, fast_mode=fast_mode, max_chunks=max_chunks)
         if timeline:
@@ -711,13 +723,13 @@ def _extract_preplanned_caption_colors(script_sections):
 def add_dynamic_auto_captions_to_video(
     video_path,
     script_sections,
-    font_size=55,
+    font_size=72,
     position_ratio=0.5,
     preset="ultrafast",
 ):
     """
     Add dynamic middle-screen captions after final composition.
-    Captions are timed from spoken section durations and displayed in 2-3 word chunks.
+    Captions are timed from spoken section durations and displayed in 2-4 word chunks.
     """
     if not video_path or not os.path.exists(video_path):
         return video_path
@@ -742,6 +754,11 @@ def add_dynamic_auto_captions_to_video(
         return video_path
 
     fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
+    font_size = int(os.getenv("AUTO_CAPTIONS_FONT_SIZE", str(font_size or 72)))
+    fast_stroke_width = int(os.getenv("AUTO_CAPTIONS_FAST_STROKE_WIDTH", "5"))
+    glow_stroke_width = int(os.getenv("AUTO_CAPTIONS_GLOW_STROKE_WIDTH", "12"))
+    main_stroke_width = int(os.getenv("AUTO_CAPTIONS_STROKE_WIDTH", "6"))
+    shine_stroke_width = int(os.getenv("AUTO_CAPTIONS_SHINE_STROKE_WIDTH", "3"))
     color_map = _extract_preplanned_caption_colors(script_sections)
     if not color_map and not fast_mode:
         color_map = _get_gpt_caption_colors(script_sections)
@@ -778,7 +795,7 @@ def add_dynamic_auto_captions_to_video(
                     font_size=font_size,
                     color="#FFFFFF",
                     stroke_color=highlight,
-                    stroke_width=3,
+                    stroke_width=fast_stroke_width,
                     method="caption",
                     size=(int(base_clip.w * 0.9), None),
                 ).with_start(start).with_duration(duration).with_position(("center", center_y))
@@ -791,7 +808,7 @@ def add_dynamic_auto_captions_to_video(
                     font_size=font_size,
                     color=highlight,
                     stroke_color=highlight,
-                    stroke_width=8,
+                    stroke_width=glow_stroke_width,
                     method="caption",
                     size=(int(base_clip.w * 0.9), None),
                 ).with_start(start).with_duration(duration).with_position(("center", center_y)).with_opacity(0.22)
@@ -803,7 +820,7 @@ def add_dynamic_auto_captions_to_video(
                     font_size=font_size,
                     color="#FFFFFF",
                     stroke_color=highlight,
-                    stroke_width=4,
+                    stroke_width=main_stroke_width,
                     method="caption",
                     size=(int(base_clip.w * 0.9), None),
                 ).with_start(start).with_duration(duration).with_position(("center", center_y))
@@ -816,7 +833,7 @@ def add_dynamic_auto_captions_to_video(
                     font_size=font_size,
                     color="#FFFFFF",
                     stroke_color="#FFFFFF",
-                    stroke_width=2,
+                    stroke_width=shine_stroke_width,
                     method="caption",
                     size=(int(base_clip.w * 0.9), None),
                 ).with_start(start + min(0.08, duration * 0.2)).with_duration(shine_dur).with_position(("center", center_y - 1)).with_opacity(0.55)

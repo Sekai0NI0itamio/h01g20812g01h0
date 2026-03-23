@@ -29,7 +29,7 @@ from automation.shorts_maker_I import YTShortsCreator_I
 from automation.thumbnail import ThumbnailGenerator
 from helper.minor_helper import ensure_output_directory, parse_script_to_cards, cleanup_temp_directories
 from helper.c05_key_provider import configure_provider_keys_from_c05
-from helper.image import fetch_image_from_duckduckgo
+from helper.image import fetch_best_image_for_prompt
 
 load_dotenv()
 YOUTUBE_TOPIC = os.getenv("YOUTUBE_TOPIC", "Artificial Intelligence")
@@ -402,8 +402,8 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                         generate_timed_meme_insertion_plan,
                         script_sections=script_cards,
                         topic=topic,
-                        min_insertions=5,
-                        max_insertions=11,
+                        min_insertions=int(os.getenv("SHORTS_MEME_MIN_INSERTIONS", "9")),
+                        max_insertions=int(os.getenv("SHORTS_MEME_MAX_INSERTIONS", "15")),
                     )
                     color_future = planner_pool.submit(
                         generate_timed_word_color_plan,
@@ -443,8 +443,8 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                         generate_meme_insertion_plan,
                         script_lines=card_texts,
                         topic=topic,
-                        min_insertions=5,
-                        max_insertions=11,
+                        min_insertions=int(os.getenv("SHORTS_MEME_MIN_INSERTIONS", "9")),
+                        max_insertions=int(os.getenv("SHORTS_MEME_MAX_INSERTIONS", "15")),
                     )
 
                     if sfx_future:
@@ -487,7 +487,11 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                     continue
 
                 meme_query = entry.get("query", "")
-                meme_img_path = fetch_image_from_duckduckgo(meme_query)
+                meme_img_path = fetch_best_image_for_prompt(
+                    meme_query,
+                    style="meme reaction image",
+                    allow_ai_fallback=True,
+                )
                 if not meme_img_path:
                     continue
 

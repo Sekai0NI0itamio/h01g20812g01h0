@@ -10,10 +10,13 @@ from automation.scitely_client import (
     create_chat_completion,
     disable_scitely,
     get_default_chat_provider,
+    get_preferred_chat_model,
     get_nvidia_api_key,
     is_scitely_disabled,
+    is_g4f_available,
     get_scitely_api_key,
     get_scitely_model,
+    has_any_chat_provider,
 )
 
 # Configure logging - don't use basicConfig since main.py handles this
@@ -31,7 +34,7 @@ REDDIT_REWRITE_SYSTEM_PROMPT = (
     "that captures the emotional arc (confusion, embarrassment, realization, etc.) as it unfolded in real time. "
     "Use plain everyday words only and avoid literary or poetic descriptors. "
     "Minor grammar imperfections are acceptable if the flow feels natural. "
-    "Prefer connecting ideas with the word 'and' and avoid commas as much as possible."
+    "Keep it as one paragraph, but use short clear sentences with periods so it does not turn into one giant run-on."
 )
 
 REDDIT_REWRITE_USER_TEMPLATE = (
@@ -39,10 +42,45 @@ REDDIT_REWRITE_USER_TEMPLATE = (
     "Rewrite this as a single, focused paragraph in first-person perspective.\n"
     "Keep all key events and details, enhance emotional texture and sensory moments, and use a natural, conversational tone.\n"
     "Use simple non-literary wording and keep it fluid even if grammar is not perfect.\n"
-    "Connect ideas using 'and' and avoid commas.\n"
+    "Keep it as one paragraph, but break the narration into short, clear sentences with periods.\n"
+    "Avoid giant run-on sentences.\n"
     "End with a call for comments, like: Comment what you think about this down in the comments.\n"
     "Return exactly one paragraph (no lists or line breaks)."
 )
+
+
+def _split_run_on_paragraph(text, max_words_per_sentence=16):
+    """Break a long run-on paragraph into shorter sentence-like clauses while keeping one paragraph."""
+    clauses = re.split(r"\s+(?=(?:and|but|then|because|when|while|after|before|finally|so)\b)", text)
+    rebuilt_sentences = []
+    current_parts = []
+    current_words = 0
+
+    for clause in clauses:
+        clean_clause = str(clause or "").strip(" ,")
+        if not clean_clause:
+            continue
+
+        clause_words = len(clean_clause.split())
+        if current_parts and current_words + clause_words > max_words_per_sentence:
+            rebuilt_sentences.append(" ".join(current_parts).strip(" ,"))
+            current_parts = [clean_clause]
+            current_words = clause_words
+        else:
+            current_parts.append(clean_clause)
+            current_words += clause_words
+
+    if current_parts:
+        rebuilt_sentences.append(" ".join(current_parts).strip(" ,"))
+
+    normalized_sentences = []
+    for sentence in rebuilt_sentences:
+        trimmed = sentence.strip(" .!?")
+        if not trimmed:
+            continue
+        normalized_sentences.append(trimmed[0].upper() + trimmed[1:] if len(trimmed) > 1 else trimmed.upper())
+
+    return ". ".join(normalized_sentences).strip()
 
 
 def _normalize_paragraph_narration_style(paragraph_text):
@@ -51,9 +89,28 @@ def _normalize_paragraph_narration_style(paragraph_text):
     if not text:
         return text
 
-    # Enforce no commas; prefer simple "and" flow.
-    text = text.replace(",", " and")
+    text = re.sub(r"\s*[,;:]+\s*", ". ", text)
+    text = re.sub(r"([.!?])(?=[A-Za-z])", r"\1 ", text)
     text = re.sub(r"\s+", " ", text).strip()
+
+    segments = []
+    raw_segments = [segment.strip(" ,") for segment in re.split(r"[.!?]+", text) if segment.strip(" ,")]
+    for segment in raw_segments:
+        if len(segment.split()) > 24:
+            split_segment = _split_run_on_paragraph(segment)
+            if split_segment:
+                segments.extend([part.strip() for part in split_segment.split(".") if part.strip()])
+        else:
+            segments.append(segment)
+
+    if not segments and text:
+        segments = [text]
+
+    text = ". ".join(
+        part[0].upper() + part[1:] if len(part) > 1 else part.upper()
+        for part in segments
+        if part
+    ).strip()
 
     cta = "Comment what you think about this down in the comments"
     lowered = text.lower()
@@ -75,6 +132,21 @@ def _load_script_template():
 
 def _has_structured_ai_provider():
     return bool(get_scitely_api_key() or get_nvidia_api_key())
+
+
+def _has_chat_ai_provider():
+    return has_any_chat_provider() or is_g4f_available()
+
+
+def _get_completion_model(model=None):
+    return model or get_preferred_chat_model()
+
+
+def _get_active_completion_provider():
+    provider = get_default_chat_provider()
+    if provider == "scitely" and is_scitely_disabled():
+        return "auto"
+    return provider
 
 
 def _parse_json_response(response_content):
@@ -145,7 +217,7 @@ def _extract_completion_content(response):
 
 
 def _create_json_completion(prompt, model, max_tokens, temperature):
-    provider = "nvidia" if is_scitely_disabled() else get_default_chat_provider()
+    provider = _get_active_completion_provider()
     if provider == "nvidia":
         response = create_chat_completion(
             messages=[{"role": "user", "content": prompt}],
@@ -172,7 +244,8 @@ def _create_json_completion(prompt, model, max_tokens, temperature):
             raise
 
         logger.warning(
-            "Scitely model %s rejected JSON mode, retrying without response_format.",
+            "Provider %s rejected JSON mode for model %s, retrying without response_format.",
+            provider,
             model,
         )
         response = create_chat_completion(
@@ -180,14 +253,14 @@ def _create_json_completion(prompt, model, max_tokens, temperature):
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
-            provider="nvidia",
+            provider=provider,
         )
 
     return _extract_completion_content(response)
 
 
 def _create_text_completion(messages, model, max_tokens, temperature):
-    provider = "nvidia" if is_scitely_disabled() else get_default_chat_provider()
+    provider = _get_active_completion_provider()
     if provider == "nvidia":
         response = create_chat_completion(
             messages=messages,
@@ -210,7 +283,7 @@ def _create_text_completion(messages, model, max_tokens, temperature):
         if getattr(exc, "provider", "") == "scitely":
             disable_scitely(exc)
         logger.warning(
-            "Text completion failed with provider %s, retrying with NVIDIA.",
+            "Text completion failed with provider %s, retrying with auto provider selection.",
             provider,
         )
         response = create_chat_completion(
@@ -218,7 +291,7 @@ def _create_text_completion(messages, model, max_tokens, temperature):
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
-            provider="nvidia",
+            provider="auto",
         )
 
     return _extract_completion_content(response)
@@ -262,7 +335,8 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
     - paragraph must be first-person, conversational, emotionally clear, and easy to narrate aloud.
     - paragraph must use plain, everyday words and avoid literary/descriptive flourish.
     - paragraph may include minor grammar imperfections if it sounds natural.
-    - paragraph should connect ideas with "and" and avoid commas.
+    - paragraph must stay as one paragraph, but it should use short clear sentences with periods.
+    - paragraph must not feel like one giant run-on sentence.
     - paragraph should end with a comment CTA line such as "Comment what you think about this down in the comments."
     - do not include labels, bullet points, timestamps, or a separate line-by-line script.
     - title should be 40-60 characters and click-worthy.
@@ -294,7 +368,8 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
     - paragraph must be exactly one paragraph (no internal line breaks) in first-person.
     - paragraph must use plain, everyday words and avoid literary/descriptive flourish.
     - paragraph may include minor grammar imperfections if it sounds natural.
-    - paragraph should connect ideas with "and" and avoid commas.
+    - paragraph must stay as one paragraph, but it should use short clear sentences with periods.
+    - paragraph must not feel like one giant run-on sentence.
     - paragraph should end with a comment CTA line such as "Comment what you think about this down in the comments."
     - script must be derived from the paragraph (break the paragraph into concise caption-sized beats).
     - script should be 8 to 16 lines, one caption/beat per line, each 4-12 words.
@@ -464,10 +539,10 @@ def generate_batch_video_queries(texts: list[str], overall_topic="technology", m
         dict: A dictionary mapping the index (int) of the input text to the generated query string (str).
               Returns an empty dictionary on failure after retries.
     """
-    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
-        raise ValueError("No supported AI provider is configured. Set SCITELY_API_KEY or NVIDIA_API_KEY in .env.")
+    if not _has_chat_ai_provider():
+        raise ValueError("No supported AI provider is configured. Install g4f or configure Scitely/NVIDIA.")
 
-    model = model or get_scitely_model()
+    model = _get_completion_model(model)
 
     # Prepare the input text part of the prompt
     formatted_texts = ""
@@ -552,10 +627,10 @@ def generate_batch_image_prompts(texts: list[str], overall_topic="technology", m
         dict: A dictionary mapping the index (int) of the input text to the generated image prompt (str).
               Returns an empty dictionary on failure after retries.
     """
-    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
-        raise ValueError("No supported AI provider is configured. Set SCITELY_API_KEY or NVIDIA_API_KEY in .env.")
+    if not _has_chat_ai_provider():
+        raise ValueError("No supported AI provider is configured. Install g4f or configure Scitely/NVIDIA.")
 
-    model = model or get_scitely_model()
+    model = _get_completion_model(model)
 
     # Prepare the input text part of the prompt
     if timed_sections:
@@ -647,17 +722,17 @@ def generate_sound_effect_plan(script_lines, sound_effect_files, topic="", model
     if not script_lines or not sound_effect_files:
         return []
 
-    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
-        logger.warning("No structured AI provider available; skipping sound effect planning")
+    if not _has_chat_ai_provider():
+        logger.warning("No AI provider available; skipping sound effect planning")
         return []
 
-    model = model or get_scitely_model()
-    if is_scitely_disabled():
-        logger.info("Scitely is disabled; sound effect planning will use NVIDIA")
+    model = _get_completion_model(model)
+    logger.info("Using AI provider %s for sound effect planning", _get_active_completion_provider())
 
     total_lines = len(script_lines)
-    min_required = max(1, math.ceil((total_lines * 2) / 3) - 5)
-    max_effects = total_lines
+    sound_effect_reduction = max(0, int(os.getenv("SHORTS_SFX_REDUCTION", "5")))
+    min_required = max(1, math.ceil((total_lines * 2) / 3) - 5 - sound_effect_reduction)
+    max_effects = max(min_required, total_lines - sound_effect_reduction)
 
     formatted_lines = "\n".join(
         [f"{idx}: {line}" for idx, line in enumerate(script_lines)]
@@ -790,17 +865,17 @@ def generate_timed_sound_effect_plan(script_sections, sound_effect_files, topic=
     if not script_sections or not sound_effect_files:
         return []
 
-    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
-        logger.warning("No structured AI provider available; skipping timed sound effect planning")
+    if not _has_chat_ai_provider():
+        logger.warning("No AI provider available; skipping timed sound effect planning")
         return []
 
-    model = model or get_scitely_model()
-    if is_scitely_disabled():
-        logger.info("Scitely is disabled; timed sound effect planning will use NVIDIA")
+    model = _get_completion_model(model)
+    logger.info("Using AI provider %s for timed sound effect planning", _get_active_completion_provider())
 
     total_sections = len(script_sections)
-    min_required = max(1, math.ceil((total_sections * 2) / 3) - 5)
-    max_effects = total_sections
+    sound_effect_reduction = max(0, int(os.getenv("SHORTS_SFX_REDUCTION", "5")))
+    min_required = max(1, math.ceil((total_sections * 2) / 3) - 5 - sound_effect_reduction)
+    max_effects = max(min_required, total_sections - sound_effect_reduction)
 
     formatted_sections = _format_timed_sections_for_prompt(script_sections)
     formatted_sfx = "\n".join([f"- {name}" for name in sound_effect_files])
@@ -962,7 +1037,7 @@ def generate_meme_insertion_plan(
     model=None,
     retries=3,
     min_insertions=None,
-    max_insertions=11,
+    max_insertions=15,
 ):
     """
     Generate a timed meme insertion plan.
@@ -976,15 +1051,16 @@ def generate_meme_insertion_plan(
     if not script_lines:
         return []
 
-    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
-        logger.warning("No structured AI provider available; skipping meme insertion planning")
+    if not _has_chat_ai_provider():
+        logger.warning("No AI provider available; skipping meme insertion planning")
         return []
 
-    model = model or get_scitely_model()
-    if is_scitely_disabled():
-        logger.info("Scitely is disabled; meme insertion planning will use NVIDIA")
+    model = _get_completion_model(model)
+    logger.info("Using AI provider %s for meme insertion planning", _get_active_completion_provider())
 
-    max_effective = max(1, min(int(max_insertions), 11, len(script_lines)))
+    meme_duration_min = float(os.getenv("SHORTS_MEME_DURATION_MIN", "2.0"))
+    meme_duration_max = float(os.getenv("SHORTS_MEME_DURATION_MAX", "2.5"))
+    max_effective = max(1, min(int(max_insertions), 15, len(script_lines)))
     formula_min = math.ceil((len(script_lines) * 2) / 3) - 4
     requested_min = formula_min if min_insertions is None else int(min_insertions)
     min_effective = max(1, min(requested_min, max_effective))
@@ -1002,7 +1078,7 @@ def generate_meme_insertion_plan(
     2) Use distinct line_index values.
     3) query must be short (2-6 words) and searchable.
     4) offset_seconds should be 0.0 to 2.0.
-    5) duration_seconds should be 2.0 to 5.0.
+    5) duration_seconds should be {meme_duration_min:.1f} to {meme_duration_max:.1f}.
     6) Keep choices relevant to each selected line.
 
     Return ONLY valid JSON in this exact shape:
@@ -1054,7 +1130,7 @@ def generate_meme_insertion_plan(
                         "line_index": line_index,
                         "query": query,
                         "offset_seconds": max(0.0, min(2.0, offset_seconds)),
-                        "duration_seconds": max(2.0, min(5.0, duration_seconds)),
+                        "duration_seconds": max(meme_duration_min, min(meme_duration_max, duration_seconds)),
                     }
                 )
                 used_lines.add(line_index)
@@ -1077,7 +1153,7 @@ def generate_meme_insertion_plan(
                             "line_index": idx,
                             "query": fallback_query,
                             "offset_seconds": 0.3,
-                            "duration_seconds": 3.0,
+                            "duration_seconds": min(meme_duration_max, max(meme_duration_min, 2.25)),
                         }
                     )
                     used.add(idx)
@@ -1106,7 +1182,7 @@ def generate_timed_meme_insertion_plan(
     model=None,
     retries=3,
     min_insertions=None,
-    max_insertions=11,
+    max_insertions=15,
 ):
     """
     Generate a timed meme insertion plan from Whisper-timed transcript sections.
@@ -1114,15 +1190,16 @@ def generate_timed_meme_insertion_plan(
     if not script_sections:
         return []
 
-    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
-        logger.warning("No structured AI provider available; skipping timed meme planning")
+    if not _has_chat_ai_provider():
+        logger.warning("No AI provider available; skipping timed meme planning")
         return []
 
-    model = model or get_scitely_model()
-    if is_scitely_disabled():
-        logger.info("Scitely is disabled; timed meme insertion planning will use NVIDIA")
+    model = _get_completion_model(model)
+    logger.info("Using AI provider %s for timed meme insertion planning", _get_active_completion_provider())
 
-    max_effective = max(1, min(int(max_insertions), 11, len(script_sections)))
+    meme_duration_min = float(os.getenv("SHORTS_MEME_DURATION_MIN", "2.0"))
+    meme_duration_max = float(os.getenv("SHORTS_MEME_DURATION_MAX", "2.5"))
+    max_effective = max(1, min(int(max_insertions), 15, len(script_sections)))
     formula_min = math.ceil((len(script_sections) * 2) / 3) - 4
     requested_min = formula_min if min_insertions is None else int(min_insertions)
     min_effective = max(1, min(requested_min, max_effective))
@@ -1142,7 +1219,7 @@ def generate_timed_meme_insertion_plan(
     2) Use distinct section_index values.
     3) query must be short, searchable, and meme-friendly (2-6 words).
     4) offset_seconds is relative to the section start.
-    5) duration_seconds must fit inside that section.
+    5) duration_seconds should target {meme_duration_min:.1f} to {meme_duration_max:.1f} seconds when the section is long enough, and must fit inside that section.
     6) Prefer funny reaction images, awkward reaction faces, chaotic memes, or iconic visual jokes that match the beat.
 
     Return ONLY valid JSON in this exact shape:
@@ -1192,7 +1269,8 @@ def generate_timed_meme_insertion_plan(
 
                 offset_seconds = max(0.0, min(max(0.0, section_duration - 0.1), offset_seconds))
                 remaining = max(0.25, section_duration - offset_seconds)
-                duration_seconds = max(0.25, min(remaining, duration_seconds))
+                target_duration = max(meme_duration_min, min(meme_duration_max, duration_seconds))
+                duration_seconds = max(0.25, min(remaining, target_duration))
 
                 normalized.append(
                     {
@@ -1213,7 +1291,10 @@ def generate_timed_meme_insertion_plan(
                     if idx in used:
                         continue
                     fallback_query = " ".join(str(section.get("text", "")).split()[:6]).strip() or "funny reaction meme"
-                    fallback_duration = min(3.0, max(0.25, float(section.get("duration", 3.0) or 3.0)))
+                    fallback_duration = min(
+                        max(0.25, float(section.get("duration", meme_duration_max) or meme_duration_max)),
+                        max(meme_duration_min, meme_duration_max),
+                    )
                     normalized.append(
                         {
                             "line_index": idx,
@@ -1249,13 +1330,12 @@ def generate_timed_word_color_plan(script_sections, topic="", model=None, retrie
     if not script_sections:
         return {}
 
-    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
-        logger.warning("No structured AI provider available; skipping timed word color planning")
+    if not _has_chat_ai_provider():
+        logger.warning("No AI provider available; skipping timed word color planning")
         return {}
 
-    model = model or get_scitely_model()
-    if is_scitely_disabled():
-        logger.info("Scitely is disabled; timed word color planning will use NVIDIA")
+    model = _get_completion_model(model)
+    logger.info("Using AI provider %s for timed word color planning", _get_active_completion_provider())
 
     formatted_sections = _format_timed_sections_for_prompt(script_sections)
     prompt = f"""
@@ -1339,12 +1419,11 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
             - thumbnail_hf_prompt: Detailed prompt for downstream image selection
             - thumbnail_unsplash_query: Simple query for Unsplash image search
     """
-    if not _has_structured_ai_provider() and get_default_chat_provider() != "nvidia":
-        raise ValueError("No supported AI provider is configured. Set SCITELY_API_KEY or NVIDIA_API_KEY in .env.")
+    if not _has_chat_ai_provider():
+        raise ValueError("No supported AI provider is configured. Install g4f or configure Scitely/NVIDIA.")
 
-    model = model or get_scitely_model()
-    if is_scitely_disabled():
-        logger.info("Scitely is disabled; comprehensive content generation will use NVIDIA")
+    model = _get_completion_model(model)
+    logger.info("Using AI provider %s for comprehensive content generation", _get_active_completion_provider())
 
     user_story_text = str(source_story_text or "").strip()
     if user_story_text:
@@ -1391,6 +1470,8 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
        - Starts directly on the topic
        - Is written in first person and sounds like natural speech
        - Uses simple, clear wording for young teens (12-16)
+       - Uses short clear sentences with periods even though it stays one paragraph
+       - Does not read like one giant run-on sentence
        - DOES NOT include labels like "Hook:", "Intro:", etc.
        - DOES NOT include tips, advice, steps, or list formats
        - DOES NOT include a presenter intro or title readout

@@ -24,7 +24,13 @@ DEFAULT_SCITELY_BASE_URL = "https://api.scitely.com/v1"
 DEFAULT_SCITELY_MODEL = "deepseek-v3.2"
 DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
-DEFAULT_G4F_MODEL = "gpt-4o-mini"
+DEFAULT_G4F_MODEL = "gemini-2.5-pro"
+DEFAULT_G4F_MODEL_FALLBACKS = (
+    "gpt-4.1",
+    "gpt-4o",
+    "deepseek-v3-0324",
+    "gpt-4o-mini",
+)
 
 _SCITELY_DISABLED = False
 _G4F_CLIENT = None
@@ -69,19 +75,50 @@ def get_g4f_model(default=None):
     return value or (default or DEFAULT_G4F_MODEL)
 
 
+def get_g4f_model_fallbacks():
+    raw = (os.getenv("G4F_MODEL_FALLBACKS") or "").strip()
+    configured = [item.strip() for item in raw.split(",") if item.strip()]
+    candidates = [get_g4f_model()] + configured + list(DEFAULT_G4F_MODEL_FALLBACKS)
+    deduped = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def is_g4f_available():
+    return G4FClient is not None
+
+
+def has_any_chat_provider():
+    return bool(get_scitely_api_key() or get_nvidia_api_key() or is_g4f_available())
+
+
+def get_preferred_chat_model(provider=None, default=None):
+    candidate = (provider or get_default_chat_provider() or "g4f").strip().lower()
+    if candidate == "auto":
+        provider_order = _get_provider_order()
+        candidate = provider_order[0] if provider_order else "g4f"
+    if candidate == "nvidia":
+        return get_nvidia_model(default)
+    if candidate == "g4f":
+        return get_g4f_model(default)
+    return get_scitely_model(default)
+
+
 def get_default_chat_provider():
     provider = os.getenv("AI_PROVIDER", "").strip().lower()
     if provider in {"scitely", "nvidia", "g4f"}:
         return provider
 
-    return "auto"
+    return "g4f"
 
 
 def _get_provider_order() -> List[str]:
-    raw = os.getenv("AI_PROVIDER_ORDER", "scitely,nvidia,g4f")
+    raw = os.getenv("AI_PROVIDER_ORDER", "g4f")
     parsed = [item.strip().lower() for item in raw.split(",") if item.strip()]
     order = [item for item in parsed if item in {"scitely", "nvidia", "g4f"}]
-    return order or ["scitely", "nvidia", "g4f"]
+    return order or ["g4f"]
 
 
 def _extract_completion_text(response):
@@ -215,7 +252,7 @@ def create_chat_completion(
         return _post_chat_completion(
             base_url=get_nvidia_base_url(),
             api_key=nvidia_api_key,
-            model=get_nvidia_model(),
+            model=model if provider == "nvidia" and model else get_nvidia_model(),
             messages=messages,
             max_tokens=None,
             temperature=None,
@@ -226,27 +263,39 @@ def create_chat_completion(
         )
 
     def call_g4f():
-        try:
-            response = _get_g4f_client().chat.completions.create(
-                model=get_g4f_model(),
-                messages=messages,
-            )
-        except Exception as exc:
-            raise ScitelyAPIError(f"g4f request failed: {exc}", provider="g4f") from exc
+        last_exc = None
+        requested_model = (model or "").strip()
+        candidate_models = [requested_model] if requested_model else get_g4f_model_fallbacks()
 
-        if hasattr(response, "model_dump"):
+        for candidate_model in candidate_models:
             try:
-                return response.model_dump(exclude_none=True)
-            except Exception:
-                pass
-        if hasattr(response, "dict"):
-            try:
-                return response.dict(exclude_none=True)
-            except Exception:
-                pass
-        if isinstance(response, dict):
-            return response
-        return {"content": str(response)}
+                response = _get_g4f_client().chat.completions.create(
+                    model=candidate_model,
+                    messages=messages,
+                )
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("g4f chat completion failed with model %s: %s", candidate_model, exc)
+                continue
+
+            if hasattr(response, "model_dump"):
+                try:
+                    return response.model_dump(exclude_none=True)
+                except Exception:
+                    pass
+            if hasattr(response, "dict"):
+                try:
+                    return response.dict(exclude_none=True)
+                except Exception:
+                    pass
+            if isinstance(response, dict):
+                return response
+            return {"content": str(response)}
+
+        raise ScitelyAPIError(
+            f"g4f request failed across candidate models {candidate_models}: {last_exc}",
+            provider="g4f",
+        ) from last_exc
 
     def call_scitely():
         if not scitely_api_key:
@@ -254,7 +303,7 @@ def create_chat_completion(
         return _post_chat_completion(
             base_url=get_scitely_base_url(),
             api_key=scitely_api_key,
-            model=model or get_scitely_model(),
+            model=model if provider == "scitely" and model else get_scitely_model(),
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -311,7 +360,7 @@ def create_chat_completion(
         raise scitely_error
 
     raise ValueError(
-        "No working AI provider is configured. Set Scitely and/or NVIDIA keys, or install g4f fallback."
+        "No working AI provider is configured. Install g4f or explicitly configure Scitely/NVIDIA."
     )
 
 

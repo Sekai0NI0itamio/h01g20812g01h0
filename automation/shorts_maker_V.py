@@ -401,7 +401,12 @@ class YTShortsCreator_V:
                             continue
 
                         meme_offset = max(0.0, float(meme.get('offset_seconds', 0.0) or 0.0))
-                        meme_duration = max(2.0, min(5.0, float(meme.get('duration_seconds', 3.0) or 3.0)))
+                        meme_duration_min = float(os.getenv("SHORTS_MEME_DURATION_MIN", "2.0"))
+                        meme_duration_max = float(os.getenv("SHORTS_MEME_DURATION_MAX", "2.5"))
+                        meme_duration = max(
+                            meme_duration_min,
+                            min(meme_duration_max, float(meme.get('duration_seconds', 2.25) or 2.25)),
+                        )
                         if meme_offset >= section_duration:
                             continue
                         meme_duration = min(meme_duration, section_duration - meme_offset)
@@ -554,7 +559,7 @@ class YTShortsCreator_V:
                 output_path = add_dynamic_auto_captions_to_video(
                     output_path,
                     script_sections=script_sections,
-                    font_size=55,
+                    font_size=int(os.getenv("AUTO_CAPTIONS_FONT_SIZE", "72")),
                     position_ratio=0.5,
                     preset="ultrafast",
                 )
