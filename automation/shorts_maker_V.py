@@ -348,7 +348,7 @@ class YTShortsCreator_V:
             section_info = {}  # For better logging in parallel renderer
             brainrot_video_path = pick_random_brainrot_video()
             brainrot_elapsed = pick_random_brainrot_start_time(brainrot_video_path, min_remaining_seconds=60.0)
-            brainrot_height_ratio = float(os.getenv("SHORTS_BRAINROT_HEIGHT_RATIO", "0.5"))
+            brainrot_height_ratio = float(os.getenv("SHORTS_BRAINROT_HEIGHT_RATIO", "0.6667"))
 
             # Now process each section using audio duration as the source of truth
             for i, (bg_clip, audio, text_clip) in enumerate(zip(background_clips, audio_data, text_clips)):
@@ -389,9 +389,9 @@ class YTShortsCreator_V:
                             continue
                         meme_duration = min(meme_duration, section_duration - meme_offset)
 
-                        meme_clip = ImageClip(meme_path).resized(width=int(self.resolution[0] * 0.55))
+                        meme_clip = ImageClip(meme_path).resized(width=int(self.resolution[0] * 0.66))
                         meme_clip = meme_clip.with_start(meme_offset).with_duration(meme_duration)
-                        meme_clip = meme_clip.with_position(("center", int(self.resolution[1] * 0.12)))
+                        meme_clip = meme_clip.with_position(("center", int(self.resolution[1] * 0.34)))
                         visual_layers.append(meme_clip)
                     except Exception as meme_err:
                         logger.warning(f"Failed to add meme overlay for section {i}: {meme_err}")
