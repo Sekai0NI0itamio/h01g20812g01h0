@@ -43,7 +43,10 @@ jobs:
       TOR_PROXY_URL: socks5h://127.0.0.1:9050
       AI_USE_TOR_TUNNEL: "false"
 
-      AI_PROVIDER: nvidia
+      AI_PROVIDER: auto
+      SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
+      SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
+      SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
 

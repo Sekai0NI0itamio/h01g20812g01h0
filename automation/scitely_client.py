@@ -57,12 +57,6 @@ def get_default_chat_provider():
     if provider in {"scitely", "nvidia"}:
         return provider
 
-    if get_nvidia_api_key():
-        return "nvidia"
-
-    if os.getenv("GITHUB_ACTIONS", "false").strip().lower() == "true":
-        return "nvidia"
-
     return "auto"
 
 
@@ -103,7 +97,10 @@ def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temper
             timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise ScitelyAPIError(str(exc), provider=provider_name) from exc
+        raise ScitelyAPIError(
+            f"{provider_name} request error calling {base_url}/chat/completions: {exc}",
+            provider=provider_name,
+        ) from exc
 
     if not response.ok:
         try:
@@ -117,7 +114,24 @@ def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temper
             or response.text
             or f"HTTP {response.status_code}"
         )
-        raise ScitelyAPIError(message, provider=provider_name)
+
+        request_id = (
+            response.headers.get("x-request-id")
+            or response.headers.get("x-correlation-id")
+            or response.headers.get("nvidia-request-id")
+            or ""
+        )
+        body_preview = (response.text or "").strip().replace("\n", " ")[:800]
+        detail = (
+            f"provider={provider_name}; "
+            f"http_status={response.status_code}; "
+            f"url={response.url}; "
+            f"model={model}; "
+            f"request_id={request_id or 'n/a'}; "
+            f"message={message}; "
+            f"body_preview={body_preview or 'n/a'}"
+        )
+        raise ScitelyAPIError(detail, provider=provider_name)
 
     return response.json()
 
