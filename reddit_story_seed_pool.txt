@@ -1,0 +1,100 @@
+# Auto Reddit story synthesis seed pool
+# Format: category|seed text
+
+setting|a campus cafeteria right before lunch
+setting|a dorm hallway with bad fluorescent lighting
+setting|a cramped apartment laundry room
+setting|the front desk of a luxury building at night
+setting|a grocery store self-checkout area
+setting|a quiet office break room after 6 PM
+setting|a suburban bus stop in light rain
+setting|a hotel hallway with thin walls
+setting|a student housing group chat
+setting|a hospital waiting room at 2 AM
+setting|a neighborhood parking garage
+setting|a maintenance corridor under an office building
+
+role|I was the only intern still in the building
+role|I was covering a night shift I did not want
+role|I was the roommate who always got dragged into drama
+role|I was the resident assistant people kept bothering
+role|I was the coworker who noticed the weird detail first
+role|I was the neighbor who heard everything through the wall
+role|I was the receptionist who had to stay polite
+role|I was the student everybody thought had the answer
+role|I was the delivery person who came at the wrong moment
+role|I was the building staff member nobody pays attention to
+
+relationship|my best friend put me in the middle of it
+relationship|my coworker acted like I had started the whole mess
+relationship|my ex was somehow standing there too
+relationship|my roommate kept insisting it was normal
+relationship|my mom called me right when it got worse
+relationship|my younger brother thought it was hilarious
+relationship|my supervisor refused to explain anything
+relationship|my neighbor kept watching from the doorway
+relationship|my class partner recognized the name before I did
+relationship|my cousin kept texting me to leave
+
+object|a missing package with no label
+object|a cracked phone screen showing one unread message
+object|a cheap keycard that should not have worked
+object|a sticky note with my name spelled wrong
+object|a paper visitor bracelet from earlier that week
+object|an old flash drive taped under a desk
+object|a coffee thermos someone left behind
+object|a maintenance door that was already unlocked
+object|a screenshot that vanished from the group chat
+object|a printed receipt for something nobody ordered
+object|a security badge that belonged to no one on staff
+object|a voice memo that ended too suddenly
+
+event|I got accused before I could explain myself
+event|I tried to help and made everything worse
+event|I heard my name before anyone saw me
+event|someone asked me a question like I already knew them
+event|the same thing happened again the next night
+event|I found a note that was clearly not meant for me
+event|I watched someone move furniture just to hide one spot
+event|a message showed up at exactly the same time twice
+event|the lights flickered right when the room went quiet
+event|everyone acted like I was overreacting
+event|the door that should have been locked opened on its own
+event|a routine delivery came for a place that does not exist
+
+twist|the person blaming me was more scared than angry
+twist|the explanation somehow made the whole thing worse
+twist|the cameras missed the only moment that mattered
+twist|the item turned up exactly where I had already looked
+twist|the one person who should have denied it just went silent
+twist|the message referenced a detail only I knew
+twist|the harmless lie escalated faster than anyone expected
+twist|the normal answer did not fit what I had actually seen
+twist|the missing thing came back with a different note on it
+twist|the person I trusted most told me to ignore it
+twist|the room layout was not the same when I went back
+twist|the story should have ended there but it absolutely did not
+
+tone|awkward
+tone|quietly panicked
+tone|defensive
+tone|sleep-deprived
+tone|deadpan
+tone|embarrassed
+tone|suspicious
+tone|annoyed
+tone|eerie
+tone|stubborn
+
+generic|cold fluorescent lights
+generic|a late-night text that made no sense
+generic|someone pretending nothing happened
+generic|the smell of cleaner and stale coffee
+generic|a hallway camera pointed the wrong way
+generic|an inside joke that stopped being funny
+generic|a room that felt occupied even when it was empty
+generic|a detail everyone else somehow missed
+generic|the sound of footsteps stopping outside the door
+generic|a name I had not heard in years
+generic|a delivery timestamp that repeated exactly
+generic|an apology that arrived too late

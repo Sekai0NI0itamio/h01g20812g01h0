@@ -32,7 +32,7 @@ from helper.c05_key_provider import configure_provider_keys_from_c05
 from helper.image import fetch_best_image_for_prompt
 
 load_dotenv()
-YOUTUBE_TOPIC = os.getenv("YOUTUBE_TOPIC", "Artificial Intelligence")
+YOUTUBE_TOPIC = os.getenv("YOUTUBE_TOPIC", "")
 
 # Configure logging with daily rotation
 LOG_DIR = 'logs'  # Define log directory
@@ -202,7 +202,7 @@ def resolve_topic(topic):
     if YOUTUBE_TOPIC and YOUTUBE_TOPIC.strip():
         return YOUTUBE_TOPIC.strip()
 
-    return "Artificial Intelligence"
+    return ""
 
 
 def should_auto_upload(auto_upload=None):
@@ -236,7 +236,7 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         image_mode = isinstance(creator_type, YTShortsCreator_I)
 
         topic = resolve_topic(topic)
-        logger.info(f"Generating comprehensive content for : {topic}")
+        logger.info("Generating comprehensive content for : %s", topic or "(auto Reddit story)")
 
         # Generate all content in a single API call.
         content_package = generate_comprehensive_content(
@@ -253,6 +253,13 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         description = content_package["description"]
         thumbnail_image_prompt = content_package["thumbnail_hf_prompt"]
         thumbnail_unsplash_query = content_package["thumbnail_unsplash_query"]
+        effective_topic = str(
+            content_package.get("effective_topic")
+            or content_package.get("source_story_title")
+            or title
+            or topic
+            or ""
+        ).strip()
 
         logger.info("Content package generated successfully:")
         logger.info(f"Title: {title}")
@@ -283,13 +290,22 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
             with open(metadata_output_path, "w", encoding="utf-8") as meta_file:
                 json.dump(
                     {
-                        "topic": topic,
+                        "topic": effective_topic or topic,
+                        "requested_topic_bias": topic,
+                        "effective_topic": effective_topic or topic,
                         "title": title,
                         "description": description,
                         "thumbnail_hf_prompt": thumbnail_image_prompt,
                         "thumbnail_unsplash_query": thumbnail_unsplash_query,
                         "paragraph": paragraph,
                         "script_format": "paragraph" if image_mode else "line_beats",
+                        "source_story_title": content_package.get("source_story_title"),
+                        "source_story_flair": content_package.get("source_story_flair"),
+                        "source_story_mode": content_package.get("source_story_mode"),
+                        "source_story_seed_terms": content_package.get("source_story_seed_terms"),
+                        "source_story_generated": bool(content_package.get("source_story_generated")),
+                        "source_story_body_raw": content_package.get("source_story_body_raw"),
+                        "source_story_seed_file": content_package.get("source_story_seed_file"),
                     },
                     meta_file,
                     ensure_ascii=False,
@@ -357,6 +373,7 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
 
             script_cards = parse_script_to_cards(script)
 
+        topic = effective_topic or topic
         logger.info(f"Script parsed into {len(script_cards)} sections")
         for i, card in enumerate(script_cards):
             logger.info(f"Section {i+1}: {card['text'][:30]}... (duration: {card['duration']}s)")
@@ -678,7 +695,7 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--topic",
-        help="Topic to generate. Defaults to YOUTUBE_TOPIC, then latest news if empty.",
+        help="Optional topic or direction bias. If empty, the app can synthesize a Reddit-style story from the seed pool.",
     )
     parser.add_argument(
         "--run-mode",

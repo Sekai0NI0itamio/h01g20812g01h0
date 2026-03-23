@@ -384,21 +384,21 @@ class ThumbnailGenerator:
     def build_thumbnail_meme_query(self, title, prompt=None):
         combined = f"{title or ''} {prompt or ''}".lower()
         if any(keyword in combined for keyword in ["angry", "furious", "slam", "fight", "war", "chaos"]):
-            return "shocked reaction meme"
+            return "dramatic phone chat screenshot argument meme with unread texts"
         if any(keyword in combined for keyword in ["side eye", "awkward", "embarrass", "cringe"]):
-            return "side eye meme"
+            return "awkward group chat screenshot meme with side eye energy"
         if any(keyword in combined for keyword in ["cute", "crush", "beauty", "flirt", "blush"]):
-            return "blushing reaction meme"
+            return "flirty text message screenshot meme with blush reaction"
         if any(keyword in combined for keyword in ["confused", "wonder", "comment", "think"]):
-            return "confused reaction meme"
-        return "funny reaction meme"
+            return "confused chat history screenshot meme with reaction messages"
+        return "funny chat history screenshot meme conversation on phone"
 
     def fetch_thumbnail_meme_image(self, title, prompt=None):
         meme_query = self.build_thumbnail_meme_query(title, prompt)
         try:
             meme_path = fetch_best_image_for_prompt(
                 meme_query,
-                style="meme reaction image",
+                style="mobile phone chat history screenshot, texting app UI, meme-style reaction image",
                 allow_ai_fallback=True,
             )
             if meme_path:
@@ -576,27 +576,27 @@ class ThumbnailGenerator:
             img = ImageOps.fit(img.convert("RGBA"), self.thumbnail_size, method=Image.LANCZOS, centering=(0.5, 0.5))
             logger.info(f"Normalized image to YouTube thumbnail dimensions: {self.thumbnail_size}")
 
-            # Create layered gradients for title and meme readability.
+            # Create layered gradients for readability without placing a solid panel behind the title.
             overlay = Image.new('RGBA', self.thumbnail_size, (0, 0, 0, 0))
             overlay_draw = ImageDraw.Draw(overlay)
-            top_fade_height = int(self.thumbnail_size[1] * 0.22)
+            top_fade_height = int(self.thumbnail_size[1] * 0.16)
             for y in range(top_fade_height):
-                alpha = int(70 * (1 - (y / max(1, top_fade_height))))
+                alpha = int(48 * (1 - (y / max(1, top_fade_height))))
                 overlay_draw.line([(0, y), (self.thumbnail_size[0], y)], fill=(0, 0, 0, alpha))
-            bottom_start = int(self.thumbnail_size[1] * 0.48)
+            bottom_start = int(self.thumbnail_size[1] * 0.72)
             for y in range(bottom_start, self.thumbnail_size[1]):
-                alpha = int(205 * ((y - bottom_start) / max(1, self.thumbnail_size[1] - bottom_start)))
+                alpha = int(150 * ((y - bottom_start) / max(1, self.thumbnail_size[1] - bottom_start)))
                 overlay_draw.line([(0, y), (self.thumbnail_size[0], y)], fill=(0, 0, 0, alpha))
 
             # Composite the image with the overlay
             img = Image.alpha_composite(img, overlay)
             logger.info("Added gradient overlay to thumbnail")
 
-            # Add meme image at the top middle.
+            # Add meme image at the bottom as a chat-style screenshot card.
             if meme_image_path and os.path.exists(meme_image_path):
                 try:
                     meme_img = Image.open(meme_image_path).convert("RGBA")
-                    max_size = (int(self.thumbnail_size[0] * 0.34), int(self.thumbnail_size[1] * 0.2))
+                    max_size = (int(self.thumbnail_size[0] * 0.54), int(self.thumbnail_size[1] * 0.25))
                     meme_img.thumbnail(max_size, Image.LANCZOS)
 
                     mask = Image.new("L", meme_img.size, 0)
@@ -620,7 +620,7 @@ class ThumbnailGenerator:
                     border.paste(meme_img, (5, 5), meme_img)
 
                     x = (self.thumbnail_size[0] - border.width) // 2
-                    y = 60
+                    y = self.thumbnail_size[1] - border.height - 72
                     shadow = Image.new("RGBA", border.size, (0, 0, 0, 155)).filter(ImageFilter.GaussianBlur(14))
                     img.paste(shadow, (x + 8, y + 10), shadow)
                     img.paste(border, (x, y), border)
@@ -633,17 +633,17 @@ class ThumbnailGenerator:
 
             # Try to load a large font and step down until it fits.
             try:
-                max_text_width = int(self.thumbnail_size[0] * 0.88)
-                font_size = 112 if len(title) < 28 else 98 if len(title) < 42 else 86 if len(title) < 58 else 74
+                max_text_width = int(self.thumbnail_size[0] * 0.84)
+                font_size = 122 if len(title) < 28 else 108 if len(title) < 42 else 94 if len(title) < 58 else 80
                 wrapped_text = None
                 font = None
-                while font_size >= 56:
+                while font_size >= 58:
                     font = ImageFont.truetype(self.title_font_path, font_size)
                     candidate_text = _wrap_text_to_width(draw, title, font, max_text_width)
                     bbox = draw.multiline_textbbox((0, 0), candidate_text, font=font, spacing=10, align="center")
                     text_width = bbox[2] - bbox[0]
                     text_height = bbox[3] - bbox[1]
-                    if text_width <= max_text_width and text_height <= int(self.thumbnail_size[1] * 0.24):
+                    if text_width <= max_text_width and text_height <= int(self.thumbnail_size[1] * 0.2):
                         wrapped_text = candidate_text
                         break
                     font_size -= 6
@@ -662,18 +662,8 @@ class ThumbnailGenerator:
                 logger.warning(f"Using default font as custom font could not be loaded: {e}")
 
             text_x = (self.thumbnail_size[0] - text_width) // 2
-            text_y = self.thumbnail_size[1] - text_height - 95
+            text_y = max(90, int(self.thumbnail_size[1] * 0.46) - (text_height // 2))
             logger.info(f"Text position calculated: x={text_x}, y={text_y}, width={text_width}, height={text_height}")
-
-            panel_padding_x = 34
-            panel_padding_y = 24
-            panel_box = (
-                text_x - panel_padding_x,
-                text_y - panel_padding_y,
-                text_x + text_width + panel_padding_x,
-                text_y + text_height + panel_padding_y,
-            )
-            draw.rounded_rectangle(panel_box, radius=34, fill=(0, 0, 0, 135))
 
             draw.multiline_text(
                 (text_x, text_y),
@@ -682,7 +672,7 @@ class ThumbnailGenerator:
                 fill=(255, 255, 255, 255),
                 align="center",
                 spacing=10,
-                stroke_width=8,
+                stroke_width=10,
                 stroke_fill=(0, 0, 0, 255),
             )
             logger.info("Added main title text")

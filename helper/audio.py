@@ -346,9 +346,14 @@ class AudioHelper:
             return []
 
         audio_data = []
+        final_section_tail_pad = max(0.0, float(os.getenv("SHORTS_FINAL_SECTION_AUDIO_TAIL_PAD", "0.42")))
+        section_tail_pad = max(0.0, float(os.getenv("SHORTS_SECTION_AUDIO_TAIL_PAD", "0.03")))
+        last_index = max(0, len(script_sections or []) - 1)
         for idx, section in enumerate(script_sections or []):
             start_time = max(0.0, float(section.get("start_time", 0.0) or 0.0))
-            end_time = max(start_time, float(section.get("end_time", start_time) or start_time))
+            transcript_end_time = max(start_time, float(section.get("end_time", start_time) or start_time))
+            tail_pad = final_section_tail_pad if idx == last_index else section_tail_pad
+            end_time = max(start_time, transcript_end_time + tail_pad)
             clip_duration = max(0.12, end_time - start_time)
             output_path = os.path.join(self.temp_dir, f"{output_prefix}_{idx:02d}.wav")
 
@@ -372,6 +377,7 @@ class AudioHelper:
                         "section_idx": idx,
                         "start_time": start_time,
                         "end_time": end_time,
+                        "transcript_end_time": transcript_end_time,
                         "preserve_timing": True,
                         "source": "master_paragraph",
                     }

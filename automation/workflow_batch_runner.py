@@ -31,6 +31,10 @@ def _coerce_bool(value: str) -> bool:
     raise ValueError(f"Invalid boolean value: {value}")
 
 
+def _auto_story_enabled() -> bool:
+    return os.getenv("SHORTS_AUTO_STORY_ENABLED", "true").strip().lower() == "true"
+
+
 def _extract_completion_content(response: dict) -> str:
     if not isinstance(response, dict):
         return ""
@@ -165,7 +169,23 @@ def find_latest_generated_video(output_dir: Path) -> Path | None:
 
 
 def copy_artifacts(index: int, topic: str, video_path: Path, script_path: Path, thumbnail_path: Path, artifacts_root: Path, meta_path: Path | None = None) -> None:
-    safe_topic = re.sub(r"[^A-Za-z0-9._-]+", "_", topic).strip("_")[:50] or f"topic_{index:03d}"
+    generated_meta = {}
+    resolved_topic = str(topic or "").strip()
+    if meta_path and meta_path.exists():
+        try:
+            candidate_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(candidate_meta, dict):
+                generated_meta = candidate_meta
+                resolved_topic = str(
+                    candidate_meta.get("effective_topic")
+                    or candidate_meta.get("source_story_title")
+                    or candidate_meta.get("title")
+                    or resolved_topic
+                ).strip()
+        except Exception as exc:
+            logger.warning("Failed to pre-read generated metadata from %s: %s", meta_path, exc)
+
+    safe_topic = re.sub(r"[^A-Za-z0-9._-]+", "_", resolved_topic).strip("_")[:50] or f"topic_{index:03d}"
     item_dir = artifacts_root / f"{index:03d}_{safe_topic}"
     item_dir.mkdir(parents=True, exist_ok=True)
 
@@ -175,20 +195,27 @@ def copy_artifacts(index: int, topic: str, video_path: Path, script_path: Path, 
 
     metadata = {
         "index": index,
-        "topic": topic,
+        "topic": resolved_topic or topic,
+        "requested_topic_bias": topic,
         "video_source": str(video_path),
         "script_source": str(script_path),
         "thumbnail_source": str(thumbnail_path),
     }
 
-    if meta_path and meta_path.exists():
+    if generated_meta:
+        metadata.update(generated_meta)
+    elif meta_path and meta_path.exists():
         try:
             generated_meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if isinstance(generated_meta, dict):
                 metadata.update(generated_meta)
-            shutil.copy2(meta_path, item_dir / "content_meta.json")
         except Exception as exc:
             logger.warning("Failed to merge generated metadata from %s: %s", meta_path, exc)
+    if meta_path and meta_path.exists():
+        try:
+            shutil.copy2(meta_path, item_dir / "content_meta.json")
+        except Exception as exc:
+            logger.warning("Failed to copy generated metadata from %s: %s", meta_path, exc)
 
     (item_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -196,7 +223,7 @@ def copy_artifacts(index: int, topic: str, video_path: Path, script_path: Path, 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sequential batch runner for GitHub Actions")
     parser.add_argument("--count", type=int, default=10, help="Number of shorts to generate")
-    parser.add_argument("--topic-direction", default="", help="Optional general direction for AI topic generation")
+    parser.add_argument("--topic-direction", default="", help="Optional topic or story-direction bias for synthetic Reddit story generation")
     parser.add_argument("--upload-to-youtube", default="false", help="true/false")
     parser.add_argument("--creator", choices=["auto", "video", "image"], default="auto")
     parser.add_argument("--artifacts-dir", default="workflow_artifacts", help="Folder to collect per-video artifacts")
@@ -227,6 +254,7 @@ def main() -> int:
     logger.info("Topic direction: %s", args.topic_direction or "(auto)")
     logger.info("Creator mode: %s", args.creator)
     logger.info("YouTube upload: %s", upload_to_youtube)
+    logger.info("Auto Reddit story mode: %s", _auto_story_enabled())
     if manual_story_text:
         logger.info("Manual story mode enabled from workflow input")
         if args.count != 1:
@@ -239,10 +267,15 @@ def main() -> int:
     for index in range(1, args.count + 1):
         if manual_story_text:
             topic = _clean_topic(args.topic_direction) or "User Provided Story"
+            display_topic = topic
+        elif _auto_story_enabled():
+            topic = _clean_topic(args.topic_direction)
+            display_topic = topic or f"Auto Reddit Story #{index}"
         else:
             topic = generate_auto_topic(args.topic_direction, index, used_topics)
-        used_topics.add(topic)
-        logger.info("[%s/%s] Topic: %s", index, args.count, topic)
+            used_topics.add(topic)
+            display_topic = topic
+        logger.info("[%s/%s] Topic bias: %s", index, args.count, display_topic)
 
         creator_instance = fixed_creator if args.creator != "auto" else None
         video_path_str, thumbnail_path_str = generate_youtube_short(
@@ -277,7 +310,7 @@ def main() -> int:
         if not thumb_path.exists():
             raise FileNotFoundError(f"Missing generated thumbnail: {thumb_path}")
 
-        copy_artifacts(index, topic, video_path, script_path, thumb_path, artifacts_root, meta_path=meta_path)
+        copy_artifacts(index, topic or display_topic, video_path, script_path, thumb_path, artifacts_root, meta_path=meta_path)
 
     logger.info("Batch run completed. Artifacts directory: %s", artifacts_root)
     return 0
