@@ -267,7 +267,7 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
     - do not include labels, bullet points, timestamps, or a separate line-by-line script.
     - title should be 40-60 characters and click-worthy.
     - description should be 100-200 characters and include 3-4 hashtags.
-    - thumbnail_hf_prompt should be 20-30 words, focused on concrete scene elements.
+    - thumbnail_hf_prompt should be 20-30 words, focused on concrete scene elements, and describe image-only art with no text, captions, or logos.
     - thumbnail_unsplash_query should be 2-4 words.
     - do not output markdown fences or extra keys.
     """
@@ -302,7 +302,7 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
     - no labels like Hook/Intro/Outro and no call-to-action line.
     - title should be 40-60 characters and click-worthy.
     - description should be 100-200 characters and include 3-4 hashtags.
-    - thumbnail_hf_prompt should be 20-30 words, focused on concrete scene elements.
+    - thumbnail_hf_prompt should be 20-30 words, focused on concrete scene elements, and describe image-only art with no text, captions, or logos.
     - thumbnail_unsplash_query should be 2-4 words.
     - do not output markdown fences or extra keys.
     """
@@ -951,7 +951,7 @@ def _build_fallback_content_package(topic, paragraph_only=False):
         "script": paragraph if paragraph_only else "\n".join(script_lines),
         "title": f"{clean_topic[:52]} Story I Could Not Ignore"[:60],
         "description": f"A personal short about {clean_topic}. #shorts #ai #story #viral",
-        "thumbnail_hf_prompt": f"Close-up dramatic scene around {clean_topic}, expressive subject, strong contrast, emotional tension, clean composition",
+        "thumbnail_hf_prompt": f"Close-up dramatic scene around {clean_topic}, expressive subject, strong contrast, emotional tension, clean composition, image only, no text",
         "thumbnail_unsplash_query": topic_slug[:32],
     }
 

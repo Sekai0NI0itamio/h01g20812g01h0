@@ -1,18 +1,21 @@
-import os
-import time
-import random
+import asyncio
+import base64
+import binascii
 import logging
+import os
+import random
 import requests
-import tempfile
 import textwrap
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from dotenv import load_dotenv
+import time
 from datetime import datetime
-import numpy as np
-import shutil
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from dotenv import load_dotenv
 
 # Custom helpers
-from helper.minor_helper import measure_time, cleanup_temp_directories
+from helper.minor_helper import cleanup_temp_directories
 from helper.network import create_requests_session
 from helper.shorts_assets import get_default_font_path
 from helper.image import fetch_image_from_duckduckgo, get_unsplash_api_key
@@ -20,6 +23,89 @@ from helper.image import fetch_image_from_duckduckgo, get_unsplash_api_key
 # Configure logging
 logger = logging.getLogger(__name__)
 REQUESTS_SESSION = create_requests_session()
+
+
+def _load_g4f():
+    try:
+        from g4f.client import AsyncClient
+        import g4f.Provider as provider_module
+    except Exception as exc:
+        raise RuntimeError(
+            "g4f is not installed or failed to import. Install dependencies first, for example: pip install g4f"
+        ) from exc
+    return AsyncClient, provider_module
+
+
+def _resolve_g4f_provider(provider_name, provider_module):
+    provider = getattr(provider_module, provider_name, None)
+    if provider is None:
+        raise ValueError(f"Unknown g4f provider: {provider_name}")
+    return provider
+
+
+def _get_g4f_response_items(response):
+    data = getattr(response, "data", None)
+    if data is not None:
+        return list(data)
+    if isinstance(response, dict):
+        return list(response.get("data") or [])
+    if hasattr(response, "model_dump"):
+        payload = response.model_dump(exclude_none=True)
+        return list(payload.get("data") or [])
+    return []
+
+
+def _get_g4f_item_value(item, key):
+    if isinstance(item, dict):
+        return item.get(key)
+    return getattr(item, key, None)
+
+
+def _save_g4f_data_url(data_url, destination):
+    _, encoded = data_url.split(",", 1)
+    destination.write_bytes(base64.b64decode(encoded))
+
+
+def _save_g4f_url(url, destination):
+    parsed = urlparse(url)
+    if url.startswith("data:"):
+        _save_g4f_data_url(url, destination)
+        return
+
+    if parsed.scheme in {"http", "https"}:
+        response = requests.get(url, timeout=180)
+        response.raise_for_status()
+        destination.write_bytes(response.content)
+        return
+
+    if parsed.scheme == "file":
+        source = Path(unquote(parsed.path))
+        destination.write_bytes(source.read_bytes())
+        return
+
+    source = Path(url).expanduser()
+    if source.exists():
+        destination.write_bytes(source.read_bytes())
+        return
+
+    raise RuntimeError(f"Could not save image from response URL: {url}")
+
+
+def _save_g4f_image_item(item, destination):
+    b64_json = _get_g4f_item_value(item, "b64_json")
+    if isinstance(b64_json, str) and b64_json.strip():
+        try:
+            destination.write_bytes(base64.b64decode(b64_json))
+            return
+        except binascii.Error as exc:
+            raise RuntimeError("Invalid base64 payload returned by g4f.") from exc
+
+    url = _get_g4f_item_value(item, "url")
+    if isinstance(url, str) and url.strip():
+        _save_g4f_url(url, destination)
+        return
+
+    raise RuntimeError("g4f returned an image item without b64_json or url.")
 
 # Timer function for performance monitoring
 def measure_time(func):
@@ -257,6 +343,164 @@ class ThumbnailGenerator:
         logger.info("Selected anime character image: %s", os.path.basename(selected))
         return selected
 
+    def generate_thumbnail_query(self, title, script_sections=None):
+        """Build a thumbnail scene description when the content package did not provide one."""
+        scene_bits = []
+        for section in script_sections or []:
+            if not isinstance(section, dict):
+                continue
+            text = str(section.get("text", "")).strip()
+            if text:
+                scene_bits.append(text.rstrip("."))
+            if len(scene_bits) >= 3:
+                break
+
+        context = ". ".join(scene_bits)
+        title = str(title or "").strip()
+        prompt_parts = [part for part in [title, context] if part]
+        if not prompt_parts:
+            return "dramatic anime thumbnail scene with a strong emotional reaction"
+        return ". ".join(prompt_parts)
+
+    def build_g4f_thumbnail_prompt(self, prompt, style="photorealistic", has_reference_image=True):
+        """Convert the AI thumbnail description into a generation-ready image prompt."""
+        clean_prompt = " ".join(str(prompt or "").split()).strip()
+        if not clean_prompt:
+            clean_prompt = "dramatic anime thumbnail scene"
+
+        style_text = str(style or "anime illustration").strip()
+        character_instruction = (
+            "Use the anime girl from the reference image as the clear main character in the foreground."
+            if has_reference_image
+            else "Make an expressive anime girl the clear main character in the foreground."
+        )
+        return (
+            f"{clean_prompt}. Create a YouTube Shorts thumbnail illustration with an anime visual identity and a "
+            f"polished {style_text} finish. {character_instruction} Strong facial emotion. Dynamic pose. "
+            "Bold cinematic lighting. Clean focal point. Rich contrast. Highly readable composition. Vertical 9:16. "
+            "No text. No title. No captions. No speech bubbles. No logo. No watermark."
+        )
+
+    def _save_resized_thumbnail(self, source_path, output_path):
+        """Normalize generated art to the project thumbnail size and save it."""
+        with Image.open(source_path) as img:
+            if img.mode in ("RGBA", "LA"):
+                background = Image.new("RGBA", img.size, (18, 18, 18, 255))
+                background.alpha_composite(img.convert("RGBA"))
+                img = background.convert("RGB")
+            else:
+                img = img.convert("RGB")
+
+            fitted = ImageOps.fit(img, self.thumbnail_size, method=Image.LANCZOS, centering=(0.5, 0.5))
+            fitted.save(output_path, quality=95)
+
+        logger.info("Saved normalized thumbnail image to %s", output_path)
+        return output_path
+
+    def create_thumbnail_image_only(self, image_path, output_path=None, anime_image_path=None):
+        """Create an image-only thumbnail fallback with no text overlays."""
+        if not output_path:
+            output_path = os.path.join(self.output_dir, f"thumbnail_{int(time.time())}.jpg")
+
+        logger.info("Creating image-only thumbnail with base image: %s", image_path)
+
+        try:
+            img = Image.open(image_path).convert("RGBA")
+            img = ImageOps.fit(img, self.thumbnail_size, method=Image.LANCZOS, centering=(0.5, 0.5))
+
+            overlay = Image.new("RGBA", self.thumbnail_size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            for y in range(self.thumbnail_size[1]):
+                alpha = int(85 * y / max(1, self.thumbnail_size[1] - 1))
+                overlay_draw.line([(0, y), (self.thumbnail_size[0], y)], fill=(0, 0, 0, alpha))
+            img = Image.alpha_composite(img, overlay)
+
+            if anime_image_path and os.path.exists(anime_image_path):
+                try:
+                    anime_img = Image.open(anime_image_path).convert("RGBA")
+                    target_h = int(self.thumbnail_size[1] * 0.62)
+                    ratio = target_h / max(1, anime_img.height)
+                    target_w = int(anime_img.width * ratio)
+                    anime_img = anime_img.resize((target_w, target_h), Image.LANCZOS)
+
+                    mask = Image.new("L", anime_img.size, 0)
+                    mask_draw = ImageDraw.Draw(mask)
+                    mask_draw.rounded_rectangle(
+                        [(0, 0), (anime_img.size[0] - 1, anime_img.size[1] - 1)],
+                        radius=28,
+                        fill=255,
+                    )
+                    anime_img.putalpha(mask)
+
+                    x = self.thumbnail_size[0] - anime_img.width - 30
+                    y = self.thumbnail_size[1] - anime_img.height - 120
+                    shadow = Image.new("RGBA", anime_img.size, (0, 0, 0, 145)).filter(ImageFilter.GaussianBlur(12))
+                    img.paste(shadow, (x + 10, y + 12), shadow)
+                    img.paste(anime_img, (x, y), anime_img)
+                    logger.info("Added anime girl overlay to image-only thumbnail fallback")
+                except Exception as exc:
+                    logger.warning("Failed to add anime image to fallback thumbnail: %s", exc)
+
+            img.convert("RGB").save(output_path, quality=95)
+            logger.info("Image-only thumbnail saved to %s", output_path)
+            return output_path
+        except Exception as exc:
+            logger.error("Error creating image-only thumbnail: %s", exc)
+            return None
+
+    async def _generate_thumbnail_with_g4f(self, prompt, anime_image_path=None, style="photorealistic"):
+        """Generate thumbnail artwork with g4f, using the anime image as a reference when available."""
+        AsyncClient, provider_module = _load_g4f()
+        client = AsyncClient()
+        has_reference_image = bool(anime_image_path and os.path.exists(anime_image_path))
+        final_prompt = self.build_g4f_thumbnail_prompt(
+            prompt,
+            style=style,
+            has_reference_image=has_reference_image,
+        )
+
+        if has_reference_image:
+            provider_name = os.getenv("G4F_THUMBNAIL_VARIATION_PROVIDER", "HuggingSpace")
+            model_name = os.getenv("G4F_THUMBNAIL_VARIATION_MODEL", "flux-kontext-dev")
+            provider = _resolve_g4f_provider(provider_name, provider_module)
+            response = await client.images.create_variation(
+                image=Path(anime_image_path).expanduser().resolve(),
+                prompt=final_prompt,
+                model=model_name,
+                provider=provider,
+                response_format="b64_json",
+                n=1,
+            )
+        else:
+            provider_name = os.getenv("G4F_THUMBNAIL_TEXT_PROVIDER", "PollinationsAI")
+            model_name = os.getenv("G4F_THUMBNAIL_TEXT_MODEL", "flux")
+            provider = _resolve_g4f_provider(provider_name, provider_module)
+            response = await client.images.generate(
+                prompt=final_prompt,
+                model=model_name,
+                provider=provider,
+                response_format="b64_json",
+                n=1,
+            )
+
+        items = _get_g4f_response_items(response)
+        if not items:
+            raise RuntimeError("g4f returned no thumbnail images.")
+
+        raw_output_path = os.path.join(
+            self.temp_dir,
+            f"g4f_thumbnail_raw_{int(time.time())}_{random.randint(1000, 9999)}.png",
+        )
+        _save_g4f_image_item(items[0], Path(raw_output_path))
+        revised_prompt = _get_g4f_item_value(items[0], "revised_prompt")
+        logger.info(
+            "Generated thumbnail artwork with g4f provider=%s model=%s revised_prompt=%s",
+            provider_name,
+            model_name,
+            bool(revised_prompt),
+        )
+        return raw_output_path
+
     @measure_time
     def create_thumbnail(self, title, image_path, output_path=None, anime_image_path=None):
         """
@@ -433,53 +677,62 @@ class ThumbnailGenerator:
     @measure_time
     def generate_thumbnail(self, title, script_sections=None, prompt=None, style="photorealistic", output_path=None):
         """
-        Main function to generate a thumbnail for a YouTube Short
+        Main function to generate a text-free thumbnail for a YouTube Short.
 
         Args:
             title (str): Title of the short
             script_sections (list): List of script sections for context
-            prompt (str): Custom prompt for image generation (optional)
-            style (str): Style of image to generate
-            output_path (str): Path to save the final thumbnail
+            prompt (str): AI-generated thumbnail scene description
+            style (str): Visual style for the image prompt
+            output_path (str): Path to save the final thumbnail art
 
         Returns:
             str: Path to the generated thumbnail
         """
-        # Create a default output path if none provided
         if not output_path:
             timestamp = int(time.time())
             output_filename = f"thumbnail_{timestamp}.jpg"
             output_path = os.path.join(self.output_dir, output_filename)
 
-        # Generate or use the image prompt
         if not prompt:
-            if script_sections:
-                prompt = self.generate_thumbnail_query(title, script_sections)
-            else:
-                prompt = f"{title}, eye-catching, vibrant colors, compelling visual, engaging thumbnail for YouTube Shorts"
+            prompt = self.generate_thumbnail_query(title, script_sections)
 
-        logger.info(f"Using thumbnail prompt: {prompt}")
-
-        # No AI generation: compose a stock background + anime character + title.
-        image_path = self.fetch_stock_background_image(prompt)
+        logger.info("Using AI thumbnail description: %s", prompt)
         anime_image_path = self.fetch_anime_character_image()
 
-        # If stock background fails, create a simple dark base.
+        try:
+            g4f_image_path = asyncio.run(
+                self._generate_thumbnail_with_g4f(
+                    prompt=prompt,
+                    anime_image_path=anime_image_path,
+                    style=style,
+                )
+            )
+            thumbnail_path = self._save_resized_thumbnail(g4f_image_path, output_path)
+            logger.info("Successfully generated g4f thumbnail at: %s", thumbnail_path)
+            return thumbnail_path
+        except Exception as exc:
+            logger.warning("g4f thumbnail generation failed, falling back to image-only composition: %s", exc)
+
+        image_path = self.fetch_stock_background_image(prompt)
         if not image_path:
             logger.warning("Stock background fetch failed. Creating fallback background.")
             temp_path = os.path.join(self.temp_dir, f"fallback_bg_{int(time.time())}.jpg")
-            Image.new('RGB', self.thumbnail_size, color=(33, 33, 33)).save(temp_path, quality=95)
+            Image.new("RGB", self.thumbnail_size, color=(33, 33, 33)).save(temp_path, quality=95)
             image_path = temp_path
 
-        # Create the final composed thumbnail
-        thumbnail_path = self.create_thumbnail(title, image_path, output_path, anime_image_path=anime_image_path)
+        thumbnail_path = self.create_thumbnail_image_only(
+            image_path=image_path,
+            output_path=output_path,
+            anime_image_path=anime_image_path,
+        )
 
         if thumbnail_path:
-            logger.info(f"Successfully generated thumbnail at: {thumbnail_path}")
+            logger.info("Successfully generated fallback thumbnail at: %s", thumbnail_path)
             return thumbnail_path
-        else:
-            logger.error("Failed to generate thumbnail")
-            return None
+
+        logger.error("Failed to generate thumbnail")
+        return None
 
     def cleanup(self):
         """Clean up temporary files"""

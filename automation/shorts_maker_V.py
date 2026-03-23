@@ -22,7 +22,7 @@ from functools import wraps
 import traceback  # Import traceback at the module level
 from helper.minor_helper import measure_time, cleanup_temp_directories
 from helper.fetch import fetch_videos_parallel
-from helper.image import create_image_clips_parallel, fetch_image_from_duckduckgo
+from helper.image import create_image_clips_parallel, fetch_best_image_for_prompt
 from helper.blur import custom_blur, custom_edge_blur
 from helper.text import TextHelper
 from helper.process import process_background_clips_parallel
@@ -290,7 +290,7 @@ class YTShortsCreator_V:
 
             if image_fallback_indices:
                 logger.warning(
-                    "Using DDG->Brave->Ecosia image fallback for %s sections where unique videos were unavailable",
+                    "Using stock-image plus g4f fallback for %s sections where unique videos were unavailable",
                     len(image_fallback_indices),
                 )
                 used_image_paths = set()
@@ -308,12 +308,19 @@ class YTShortsCreator_V:
                         if len(cleaned) >= 3 and cleaned not in query_variants:
                             query_variants.append(cleaned)
 
-                    for variant in query_variants[:8]:
-                        candidate_path = fetch_image_from_duckduckgo(variant)
+                    for variant in query_variants[:6]:
+                        candidate_path = fetch_best_image_for_prompt(
+                            variant,
+                            style=style,
+                            allow_ai_fallback=False,
+                        )
                         if candidate_path and candidate_path not in used_image_paths:
                             image_path = candidate_path
                             used_image_paths.add(candidate_path)
                             break
+
+                    if image_path is None:
+                        image_path = fetch_best_image_for_prompt(query, style=style, allow_ai_fallback=True)
 
                     image_paths.append(image_path)
                     image_durations.append(target_duration)

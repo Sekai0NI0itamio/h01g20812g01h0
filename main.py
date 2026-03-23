@@ -170,10 +170,10 @@ def _generate_thumbnail_job(output_dir, safe_title, timestamp, title, script_car
             logger.info(f"Attempting with Unsplash query: {thumbnail_unsplash_query}")
             downloaded = thumbnail_generator.fetch_image_unsplash(thumbnail_unsplash_query)
             if downloaded:
-                thumbnail_path = thumbnail_generator.create_thumbnail(
-                    title=title,
+                thumbnail_path = thumbnail_generator.create_thumbnail_image_only(
                     image_path=downloaded,
-                    output_path=thumbnail_output_path
+                    output_path=thumbnail_output_path,
+                    anime_image_path=thumbnail_generator.fetch_anime_character_image(),
                 )
 
         thumbnail_generator.cleanup()

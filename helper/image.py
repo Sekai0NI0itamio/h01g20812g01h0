@@ -1,12 +1,19 @@
-import time
-import random
+import asyncio
+import base64
+import binascii
 import os
-import requests
-import logging
 import concurrent.futures
+import logging
+import random
 import re
+import time
+from pathlib import Path
 from urllib.parse import quote_plus
+from urllib.parse import unquote, urlparse
+
+import requests
 from moviepy  import VideoClip, concatenate_videoclips, ColorClip, CompositeVideoClip, ImageClip, TextClip
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from helper.blur import custom_blur, custom_edge_blur
 from helper.minor_helper import measure_time
 from helper.network import create_requests_session
@@ -85,12 +92,143 @@ def _log_proxy_usage(provider_name):
     else:
         logger.info("%s requests using direct network (Tor disabled)", provider_name)
 
+
+def _load_g4f():
+    try:
+        from g4f.client import AsyncClient
+        import g4f.Provider as provider_module
+    except Exception as exc:
+        raise RuntimeError(
+            "g4f is not installed or failed to import. Install dependencies first, for example: pip install g4f"
+        ) from exc
+    return AsyncClient, provider_module
+
+
+def _resolve_g4f_provider(provider_name, provider_module):
+    provider = getattr(provider_module, provider_name, None)
+    if provider is None:
+        raise ValueError(f"Unknown g4f provider: {provider_name}")
+    return provider
+
+
+def _get_g4f_response_items(response):
+    data = getattr(response, "data", None)
+    if data is not None:
+        return list(data)
+    if isinstance(response, dict):
+        return list(response.get("data") or [])
+    if hasattr(response, "model_dump"):
+        payload = response.model_dump(exclude_none=True)
+        return list(payload.get("data") or [])
+    return []
+
+
+def _get_g4f_item_value(item, key):
+    if isinstance(item, dict):
+        return item.get(key)
+    return getattr(item, key, None)
+
+
+def _save_g4f_data_url(data_url, destination):
+    _, encoded = data_url.split(",", 1)
+    destination.write_bytes(base64.b64decode(encoded))
+
+
+def _save_g4f_url(url, destination):
+    parsed = urlparse(url)
+    if url.startswith("data:"):
+        _save_g4f_data_url(url, destination)
+        return
+
+    if parsed.scheme in {"http", "https"}:
+        response = requests.get(url, timeout=180)
+        response.raise_for_status()
+        destination.write_bytes(response.content)
+        return
+
+    if parsed.scheme == "file":
+        source = Path(unquote(parsed.path))
+        destination.write_bytes(source.read_bytes())
+        return
+
+    source = Path(url).expanduser()
+    if source.exists():
+        destination.write_bytes(source.read_bytes())
+        return
+
+    raise RuntimeError(f"Could not save image from response URL: {url}")
+
+
+def _save_g4f_image_item(item, destination):
+    b64_json = _get_g4f_item_value(item, "b64_json")
+    if isinstance(b64_json, str) and b64_json.strip():
+        try:
+            destination.write_bytes(base64.b64decode(b64_json))
+            return
+        except binascii.Error as exc:
+            raise RuntimeError("Invalid base64 payload returned by g4f.") from exc
+
+    url = _get_g4f_item_value(item, "url")
+    if isinstance(url, str) and url.strip():
+        _save_g4f_url(url, destination)
+        return
+
+    raise RuntimeError("g4f returned an image item without b64_json or url.")
+
+
+def _normalize_ai_image_prompt(prompt, style):
+    clean_prompt = " ".join(str(prompt or "").split()).strip()
+    if not clean_prompt:
+        clean_prompt = "dramatic short-form storytelling scene"
+
+    style_text = str(style or "cinematic illustration").strip()
+    return (
+        f"{clean_prompt}. Create a high-quality vertical 9:16 visual for a YouTube Shorts background. "
+        f"Use a polished {style_text} finish. Strong subject clarity. Cinematic lighting. Rich detail. "
+        "Centered composition that survives portrait cropping. No text. No captions. No watermark."
+    )
+
+
+def _inspect_image_quality(image_path):
+    if not image_path or not os.path.exists(image_path):
+        return False, "missing file"
+
+    try:
+        with Image.open(image_path) as img:
+            img = ImageOps.exif_transpose(img)
+            width, height = img.size
+    except Exception as exc:
+        return False, f"unreadable image: {exc}"
+
+    if min(width, height) < MIN_ACCEPTABLE_IMAGE_DIMENSION:
+        return False, f"resolution too small ({width}x{height})"
+    if width * height < MIN_ACCEPTABLE_IMAGE_PIXELS:
+        return False, f"pixel count too small ({width}x{height})"
+
+    return True, f"{width}x{height}"
+
+
+def _accept_image_candidate(image_path, provider_name):
+    ok, detail = _inspect_image_quality(image_path)
+    if ok:
+        logger.info("Accepted %s image asset %s (%s)", provider_name, os.path.basename(image_path), detail)
+        return True
+
+    logger.warning("Rejected %s image asset %s: %s", provider_name, image_path, detail)
+    return False
+
 REALISTIC_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
 ]
+
+DEFAULT_AI_IMAGE_PROVIDER = "PollinationsAI"
+DEFAULT_AI_IMAGE_MODEL = "flux"
+MIN_ACCEPTABLE_IMAGE_DIMENSION = int(os.getenv("MIN_ACCEPTABLE_IMAGE_DIMENSION", "720"))
+MIN_ACCEPTABLE_IMAGE_PIXELS = int(os.getenv("MIN_ACCEPTABLE_IMAGE_PIXELS", "650000"))
+ENABLE_G4F_IMAGE_FALLBACK = _env_bool("ENABLE_G4F_IMAGE_FALLBACK", True)
 
 QUERY_STOPWORDS = {
     "the", "and", "with", "from", "that", "this", "into", "over", "under", "through",
@@ -121,7 +259,23 @@ def _build_query_candidates(query, max_terms=8):
         if token not in words:
             words.append(token)
 
-    candidates.extend(words[:max_terms])
+    if words:
+        candidates.append(" ".join(words[: min(len(words), 6)]))
+
+    for window_size in (3, 2):
+        for idx in range(0, max(0, len(words) - window_size + 1)):
+            phrase = " ".join(words[idx:idx + window_size])
+            if phrase and phrase not in candidates:
+                candidates.append(phrase)
+            if len(candidates) >= max_terms:
+                break
+        if len(candidates) >= max_terms:
+            break
+
+    for word in words[:max_terms]:
+        if word not in candidates:
+            candidates.append(word)
+
     return candidates
 
 
@@ -321,28 +475,7 @@ def generate_images_parallel(prompts, style="photorealistic", max_workers=None):
 
     def generate_single_image(prompt):
         try:
-            # Small jitter reduces burst-rate bans from public search endpoints.
-            time.sleep(random.uniform(0.1, 0.35))
-
-            logger.info(f"Trying DuckDuckGo for: {prompt[:30]}...")
-            image_path = fetch_image_from_duckduckgo(prompt)
-            if image_path:
-                return image_path
-
-            logger.info(f"Trying Unsplash for: {prompt[:30]}...")
-            image_path = _fetch_image_from_unsplash(prompt)
-            if image_path:
-                return image_path
-
-            # If Unsplash fails, try Pexels
-            logger.info(f"Trying Pexels for: {prompt[:30]}...")
-            image_path = _fetch_image_from_pexels(prompt)
-            if image_path:
-                return image_path
-
-            # If all services fail
-            logger.error(f"All image generation methods failed for prompt: {prompt[:50]}...")
-            return None
+            return fetch_best_image_for_prompt(prompt, style=style)
         except Exception as e:
             logger.error(f"Error generating image: {e}")
             return None
@@ -383,26 +516,84 @@ def generate_images_parallel(prompts, style="photorealistic", max_workers=None):
 
 @measure_time
 def _generate_image_from_prompt(prompt, style="photorealistic", file_path=None, model=None):
-  """
-  Attempt to generate an image with the primary AI provider.
+    """
+    Generate an image with g4f for prompts that stock providers cannot satisfy cleanly.
+    """
+    if not ENABLE_G4F_IMAGE_FALLBACK:
+        logger.info("g4f image fallback disabled by environment")
+        return None
 
-  Args:
-      prompt (str): Image generation prompt
-      style (str): Style to apply to the image (e.g., "digital art", "realistic", "photorealistic")
-      file_path (str): Path to save the image, if None a path will be generated
-      model (str): Optional override model name
+    if not prompt:
+        return None
 
-  Returns:
-      str: Path to the generated image or None if failed
-  """
-  # OpenRouter image generation is disabled by design.
-  logger.info("OpenRouter image generation disabled; returning None for AI image request")
-  return None
+    if not file_path:
+        file_path = os.path.join(temp_dir, f"g4f_{int(time.time())}_{random.randint(1000, 9999)}.png")
+
+    prompt_text = _normalize_ai_image_prompt(prompt, style)
+    provider_name = os.getenv("G4F_IMAGE_PROVIDER", DEFAULT_AI_IMAGE_PROVIDER)
+    model_name = model or os.getenv("G4F_IMAGE_MODEL", DEFAULT_AI_IMAGE_MODEL)
+
+    async def _run():
+        AsyncClient, provider_module = _load_g4f()
+        provider = _resolve_g4f_provider(provider_name, provider_module)
+        client = AsyncClient()
+        response = await client.images.generate(
+            prompt=prompt_text,
+            model=model_name,
+            provider=provider,
+            response_format="b64_json",
+            n=1,
+        )
+        items = _get_g4f_response_items(response)
+        if not items:
+            raise RuntimeError("g4f returned no images.")
+        _save_g4f_image_item(items[0], Path(file_path))
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        logger.warning("g4f image generation failed for '%s': %s", prompt[:50], exc)
+        return None
+
+    if _accept_image_candidate(file_path, "g4f"):
+        return file_path
+
+    return None
 
 
 @measure_time
 def generate_image_from_prompt(prompt, style="photorealistic", file_path=None, model=None):
     return _generate_image_from_prompt(prompt, style=style, file_path=file_path, model=model)
+
+
+def fetch_best_image_for_prompt(prompt, style="photorealistic", allow_ai_fallback=True):
+    """Fetch the best available visual for a prompt, with g4f fallback when stock images fail or are weak."""
+    if not prompt:
+        return None
+
+    # Small jitter reduces burst-rate bans from public search endpoints.
+    time.sleep(random.uniform(0.1, 0.35))
+
+    attempts = [
+        ("DuckDuckGo", lambda: fetch_image_from_duckduckgo(prompt)),
+        ("Unsplash", lambda: _fetch_image_from_unsplash(prompt)),
+        ("Pexels", lambda: _fetch_image_from_pexels(prompt)),
+    ]
+
+    for provider_name, loader in attempts:
+        logger.info("Trying %s for: %s...", provider_name, prompt[:30])
+        image_path = loader()
+        if image_path and _accept_image_candidate(image_path, provider_name):
+            return image_path
+
+    if allow_ai_fallback:
+        logger.info("Trying g4f AI image fallback for: %s...", prompt[:30])
+        image_path = generate_image_from_prompt(prompt, style=style)
+        if image_path:
+            return image_path
+
+    logger.error("All image generation methods failed for prompt: %s...", prompt[:50])
+    return None
 
 @measure_time
 def _fetch_image_from_unsplash(query, file_path=None):
@@ -536,6 +727,49 @@ def create_clip(args):
         return None
 
 
+def _build_processed_story_image(image_path):
+    """
+    Prepare a portrait-safe still frame that avoids ugly crops and low-res fullscreen stretching.
+    """
+    with Image.open(image_path) as raw_img:
+        img = ImageOps.exif_transpose(raw_img).convert("RGB")
+        width, height = img.size
+        source_ratio = width / max(1, height)
+        is_low_res = min(width, height) < 900
+        needs_focus_layout = is_low_res or source_ratio > 0.8 or source_ratio < 0.45
+
+        if not needs_focus_layout:
+            return ImageOps.fit(img, resolution, method=Image.LANCZOS, centering=(0.5, 0.5))
+
+        background = ImageOps.fit(img, resolution, method=Image.LANCZOS, centering=(0.5, 0.5))
+        background = background.filter(ImageFilter.GaussianBlur(28))
+
+        # Darken the blurred background slightly so the focused image sits cleanly on top.
+        dim_overlay = Image.new("RGB", resolution, (12, 12, 18))
+        background = Image.blend(background, dim_overlay, 0.26).convert("RGBA")
+
+        foreground = img.convert("RGBA")
+        max_foreground_size = (int(resolution[0] * 0.92), int(resolution[1] * 0.74))
+        foreground.thumbnail(max_foreground_size, Image.LANCZOS)
+
+        mask = Image.new("L", foreground.size, 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rounded_rectangle(
+            [(0, 0), (foreground.size[0] - 1, foreground.size[1] - 1)],
+            radius=36,
+            fill=255,
+        )
+        foreground.putalpha(mask)
+
+        shadow = Image.new("RGBA", foreground.size, (0, 0, 0, 165)).filter(ImageFilter.GaussianBlur(20))
+        x = (resolution[0] - foreground.width) // 2
+        y = int((resolution[1] - foreground.height) * 0.45)
+
+        background.paste(shadow, (x + 10, y + 16), shadow)
+        background.paste(foreground, (x, y), foreground)
+        return background.convert("RGB")
+
+
 def _center_crop_clip(clip, width, height):
     """MoviePy compatibility helper for center-cropping across versions."""
     w, h = clip.size
@@ -626,31 +860,20 @@ def _create_still_image_clip(image_path, duration, text=None, text_position=('ce
   Returns:
       VideoClip: MoviePy clip containing the image and effects
   """
-  # Load image
-  image = ImageClip(image_path)
+  processed_path = os.path.join(
+      temp_dir,
+      f"prepared_{int(time.time() * 1000)}_{random.randint(1000, 9999)}.jpg"
+  )
+  prepared = _build_processed_story_image(image_path)
+  prepared.save(processed_path, quality=95)
 
-  # resized to fill screen while maintaining aspect ratio
-  img_ratio = image.size[0] / image.size[1]
-  target_ratio = resolution[0] / resolution[1]
-
-  if img_ratio > target_ratio:  # Image is wider
-      new_height = resolution[1]
-      new_width = int(new_height * img_ratio)
-  else:  # Image is taller
-      new_width = resolution[0]
-      new_height = int(new_width / img_ratio)
-
-  image = image.resized(new_size=(new_width, new_height))
-
-  # Center crop if needed
-  if new_width > resolution[0] or new_height > resolution[1]:
-      image = _center_crop_clip(image, resolution[0], resolution[1])
+  image = ImageClip(processed_path)
 
   # Add zoom effect if requested
   if with_zoom:
       def zoom(t):
           # Start at 1.0 zoom and gradually increase
-          zoom_level = 1 + (t / duration) * zoom_factor
+          zoom_level = 1 + (t / max(duration, 0.1)) * min(zoom_factor, 0.03)
           return zoom_level
 
       # Replace lambda with named function

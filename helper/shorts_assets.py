@@ -328,9 +328,52 @@ def _chunk_caption_words(words, fast_mode=False):
     return chunks
 
 
+def _rebalance_caption_timeline(timeline, max_chunks):
+    """Compress a caption timeline without dropping the back half of the narration."""
+    if not timeline:
+        return []
+    if max_chunks is None or max_chunks <= 0 or len(timeline) <= max_chunks:
+        return timeline
+
+    merged = []
+    cursor = 0
+    total = len(timeline)
+    while cursor < total and len(merged) < max_chunks:
+        remaining = total - cursor
+        remaining_groups = max(1, max_chunks - len(merged))
+        take = int(math.ceil(remaining / remaining_groups))
+        group = timeline[cursor:cursor + take]
+        cursor += take
+        if not group:
+            continue
+
+        start = float(group[0].get("start", 0.0) or 0.0)
+        end = start
+        text_parts = []
+        words = []
+        for item in group:
+            duration = float(item.get("duration", 0.0) or 0.0)
+            end = max(end, float(item.get("start", start) or start) + duration)
+            text = str(item.get("text", "") or "").strip()
+            if text:
+                text_parts.append(text)
+            words.extend(item.get("words", []) or [])
+
+        merged.append(
+            {
+                "start": start,
+                "duration": max(0.12, end - start),
+                "text": " ".join(text_parts).strip(),
+                "words": words,
+            }
+        )
+
+    return merged
+
+
 def _build_caption_timeline(script_sections):
     fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
-    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "18")))
+    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "48")))
     timeline = []
     cursor = 0.0
     for section in script_sections or []:
@@ -362,16 +405,10 @@ def _build_caption_timeline(script_sections):
             section_cursor += chunk_duration
         cursor += duration
 
-        if len(timeline) >= max_chunks:
-            break
-
-    if len(timeline) > max_chunks:
-        timeline = timeline[:max_chunks]
-
-    return timeline
+    return _rebalance_caption_timeline(timeline, max_chunks)
 
 
-def _chunk_words_with_timestamps(words, fast_mode=False, max_chunks=18):
+def _chunk_words_with_timestamps(words, fast_mode=False, max_chunks=48):
     """Build caption chunks from timestamped words while preserving exact audio timing."""
     if not words:
         return []
@@ -379,7 +416,7 @@ def _chunk_words_with_timestamps(words, fast_mode=False, max_chunks=18):
     chunk_target = 5 if fast_mode else 3
     timeline = []
     i = 0
-    while i < len(words) and len(timeline) < max_chunks:
+    while i < len(words):
         group = words[i:i + chunk_target]
         i += chunk_target
         if not group:
@@ -400,7 +437,7 @@ def _chunk_words_with_timestamps(words, fast_mode=False, max_chunks=18):
             }
         )
 
-    return timeline
+    return _rebalance_caption_timeline(timeline, max_chunks)
 
 
 def transcribe_audio_to_word_timestamps(audio_path):
@@ -545,7 +582,7 @@ def build_script_sections_from_word_timestamps(
 
 def _build_caption_timeline_from_section_words(script_sections):
     fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
-    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "18")))
+    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "48")))
     words = []
     for section in script_sections or []:
         for item in section.get("word_timestamps", []) or []:
@@ -593,7 +630,7 @@ def _build_caption_timeline_from_audio(video_path):
         subprocess.run(cmd, check=True)
 
         fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
-        max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "18")))
+        max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "48")))
         words = transcribe_audio_to_word_timestamps(wav_path)
         timeline = _chunk_words_with_timestamps(words, fast_mode=fast_mode, max_chunks=max_chunks)
         if timeline:
