@@ -33,7 +33,7 @@ class AudioHelper:
         os.makedirs(self.temp_dir, exist_ok=True)
 
         self.freevoicereader_tts = None
-        self.max_tts_gap_seconds = float(os.getenv("TTS_MAX_GAP_SECONDS", "0.4"))
+        self.max_tts_gap_seconds = float(os.getenv("TTS_MAX_GAP_SECONDS", "0.7"))
         use_freevoicereader = os.getenv("USE_FREEVOICEREADER_TTS", "true").lower()
         logger.info("USE_FREEVOICEREADER_TTS=%s", use_freevoicereader)
 
@@ -83,7 +83,7 @@ class AudioHelper:
                     voice_style=voice_style,
                 )
                 try:
-                    sped = self._speedup_audio(out, speed=1.3)
+                    sped = self._speedup_audio(out, speed=1.1)
                     return self._normalize_tts_pacing(sped)
                 except Exception:
                     return out
@@ -275,7 +275,7 @@ class AudioHelper:
             fd, tmp_out = tempfile.mkstemp(suffix=ext, dir=dirn)
             os.close(fd)
 
-            keep_tail = max(0.05, min(self.max_tts_gap_seconds, 0.4))
+            keep_tail = max(0.05, min(self.max_tts_gap_seconds, 0.7))
             filter_chain = (
                 "silenceremove="
                 f"start_periods=1:start_silence=0.05:start_threshold=-40dB:"

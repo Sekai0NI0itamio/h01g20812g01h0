@@ -327,11 +327,11 @@ def _build_caption_timeline(script_sections):
             continue
 
         chunks = _chunk_caption_words(words)
-        weights = [sum(max(1, len(w)) for w in chunk) for chunk in chunks]
-        total_weight = max(1, sum(weights))
+        part_count = max(1, len(chunks))
+        part_duration = duration / part_count
         section_cursor = cursor
-        for chunk, weight in zip(chunks, weights):
-            chunk_duration = max(0.12, duration * (weight / total_weight))
+        for chunk in chunks:
+            chunk_duration = max(0.12, part_duration)
             timeline.append(
                 {
                     "start": section_cursor,

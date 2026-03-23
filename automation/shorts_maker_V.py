@@ -188,13 +188,17 @@ class YTShortsCreator_V:
 
             # First, check audio durations to use them as source of truth
             audio_durations = {}
+            inter_section_gap = float(os.getenv("SHORTS_AUDIO_GAP_SECONDS", "0.7"))
             for i, audio_section in enumerate(audio_data):
                 expected_duration = script_sections[i].get('duration', 5)
                 if audio_section and 'path' in audio_section:
                     try:
                         audio_clip = AudioFileClip(audio_section['path'])
-                        actual_duration = audio_clip.duration
+                        spoken_duration = audio_clip.duration
                         audio_clip.close()
+
+                        # Apply explicit pause between adjacent spoken lines.
+                        actual_duration = spoken_duration + (inter_section_gap if i < len(script_sections) - 1 else 0.0)
                         
                         # Store actual audio duration for this section
                         audio_durations[i] = actual_duration
@@ -204,7 +208,14 @@ class YTShortsCreator_V:
                         
                         # Log mismatches for debugging
                         if abs(actual_duration - expected_duration) > 0.5:
-                            logger.info(f"Section {i} audio duration ({actual_duration:.2f}s) will be used instead of script duration ({expected_duration:.2f}s)")
+                            logger.info(
+                                "Section %s spoken audio %.2fs (+%.2fs gap) => %.2fs used instead of script duration %.2fs",
+                                i,
+                                spoken_duration,
+                                inter_section_gap if i < len(script_sections) - 1 else 0.0,
+                                actual_duration,
+                                expected_duration,
+                            )
                     except Exception as e:
                         logger.error(f"Error checking audio duration for section {i}: {e}")
                         audio_durations[i] = expected_duration
