@@ -42,7 +42,7 @@ class FreeVoiceReaderVoiceover:
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.timeout = _env_int_or_default("FREEVOICEREADER_TTS_TIMEOUT", 90)
-        self.voice = _env_or_default("FREEVOICEREADER_TTS_VOICE", "en-IE-ConnorNeural")
+        self.voice = _env_or_default("FREEVOICEREADER_TTS_VOICE", "en-US-AndrewNeural")
         self.api_url = _env_or_default(
             "FREEVOICEREADER_TTS_API_URL",
             "https://www.freevoicereader.com/api/free-tts",

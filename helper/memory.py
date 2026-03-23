@@ -86,6 +86,11 @@ class SystemResources:
         Returns:
             Dictionary with optimized settings
         """
+        # Allow runtime overrides for CI tuning.
+        memory_per_worker_gb = float(os.getenv("RENDER_MEMORY_PER_WORKER_GB", memory_per_worker_gb))
+        reserved_memory_gb = float(os.getenv("RENDER_RESERVED_MEMORY_GB", reserved_memory_gb))
+        reserved_cpu_cores = int(os.getenv("RENDER_RESERVED_CPU_CORES", reserved_cpu_cores))
+
         # Update real-time system resource information
         self.memory_info = self.get_memory_info()
         self.cpu_info = self.get_cpu_info()
@@ -109,13 +114,34 @@ class SystemResources:
         # Take the minimum of memory and CPU constraints
         worker_count = min(memory_based_limit, cpu_based_limit)
         worker_count = max(1, int(worker_count * io_adjustment))  # Apply IO adjustment
-        worker_count = 3 #experiment with 3 workers
+
+        # CI optimization: use available cores aggressively unless overridden.
+        if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+            worker_count = max(1, min(worker_count, self.cpu_info['logical_cores']))
+
+        # Optional hard override from env.
+        worker_override = os.getenv("RENDER_WORKER_COUNT")
+        if worker_override:
+            try:
+                worker_count = max(1, int(worker_override))
+            except ValueError:
+                logger.warning("Invalid RENDER_WORKER_COUNT=%r; ignoring", worker_override)
+
         logger.info(f"Optimized worker count: {worker_count}")
 
         # Task-specific optimizations
         if task_type == 'video_rendering':
             # For video rendering, configure FFmpeg thread allocation
             ffmpeg_threads = max(1, min(4, int(available_cpu_cores / worker_count)))
+
+            # Optional thread override from env.
+            ffmpeg_threads_override = os.getenv("RENDER_FFMPEG_THREADS")
+            if ffmpeg_threads_override:
+                try:
+                    ffmpeg_threads = max(1, int(ffmpeg_threads_override))
+                except ValueError:
+                    logger.warning("Invalid RENDER_FFMPEG_THREADS=%r; ignoring", ffmpeg_threads_override)
+
             logger.info(f"Optimized for video rendering: {worker_count} workers with {ffmpeg_threads} FFmpeg threads each")
 
             return {

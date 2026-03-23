@@ -11,3 +11,4 @@ g4f
 psutil==6.1.1
 PySocks==1.7.1
 tqdm==4.67.1
+playwright==1.52.0

@@ -3,6 +3,7 @@ import time
 import re
 import json
 import math
+import os
 from pathlib import Path
 
 from automation.scitely_client import (
@@ -15,10 +16,30 @@ from automation.scitely_client import (
     get_scitely_model,
 )
 
+try:
+    from automation.reddit_story_fetcher import fetch_random_story_sync
+except Exception:
+    fetch_random_story_sync = None
+
 # Configure logging - don't use basicConfig since main.py handles this
 logger = logging.getLogger(__name__)
 
 SCRIPT_TEMPLATE_PATH = Path(__file__).resolve().parent / "prompts" / "ai_shorts_script_template.txt"
+
+REDDIT_REWRITE_SYSTEM_PROMPT = (
+    "You are a skilled narrative writer. I will give you a Reddit post or a short personal story. "
+    "Your task is to rewrite it as a compelling first-person storytelling piece. Preserve all the key "
+    "events and details, but enhance the emotional texture, inner thoughts, and sensory moments to make "
+    "the reader feel like they are inside the narrator's head. Use a natural, conversational tone that "
+    "matches the original voice. Keep the pacing tight-show, don't just tell. If the original has dialogue, "
+    "keep it but make it feel vivid. The goal is to turn a raw anecdote into a short, engaging narrative "
+    "that captures the emotional arc (confusion, embarrassment, realization, etc.) as it unfolded in real time."
+)
+
+REDDIT_REWRITE_USER_TEMPLATE = (
+    "Here is the story:\n\n{story}\n\n"
+    "Rewrite this in first-person perspective as a short, immersive narrative."
+)
 
 
 def _load_script_template():
@@ -136,6 +157,161 @@ def _create_json_completion(prompt, model, max_tokens, temperature):
         )
 
     return _extract_completion_content(response)
+
+
+def _create_text_completion(messages, model, max_tokens, temperature):
+    provider = "nvidia" if is_scitely_disabled() else get_default_chat_provider()
+    if provider == "nvidia":
+        response = create_chat_completion(
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            provider="nvidia",
+        )
+        return _extract_completion_content(response)
+
+    try:
+        response = create_chat_completion(
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            provider=provider,
+        )
+    except ScitelyAPIError as exc:
+        if getattr(exc, "provider", "") == "scitely":
+            disable_scitely(exc)
+        logger.warning(
+            "Text completion failed with provider %s, retrying with NVIDIA.",
+            provider,
+        )
+        response = create_chat_completion(
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            provider="nvidia",
+        )
+
+    return _extract_completion_content(response)
+
+
+def _fetch_source_story_from_reddit():
+    if fetch_random_story_sync is None:
+        logger.warning("Reddit story fetcher module is unavailable; using topic-based generation")
+        return None
+
+    try:
+        story = fetch_random_story_sync()
+        if not story:
+            logger.warning("Reddit story fetcher returned no story data")
+            return None
+        body = str(story.get("body", "")).strip()
+        if not body:
+            logger.warning("Fetched Reddit story has empty body text")
+            return None
+        logger.info("Fetched Reddit story: %s", story.get("permalink", "unknown link"))
+        return story
+    except Exception as exc:
+        logger.warning("Reddit story fetch failed: %s", exc)
+        return None
+
+
+def _rewrite_story_to_immersive_first_person(story_text, model):
+    messages = [
+        {"role": "system", "content": REDDIT_REWRITE_SYSTEM_PROMPT},
+        {"role": "user", "content": REDDIT_REWRITE_USER_TEMPLATE.format(story=story_text)},
+    ]
+    rewritten = _create_text_completion(
+        messages=messages,
+        model=model,
+        max_tokens=900,
+        temperature=0.7,
+    )
+    return str(rewritten or "").strip()
+
+
+def _build_story_content_package_prompt(topic, rewritten_story, source_title="", source_link=""):
+    return f"""
+    You are creating a complete YouTube Short content package from a rewritten first-person story.
+
+    Topic context: {topic}
+    Source title: {source_title}
+    Source permalink: {source_link}
+
+    Rewritten immersive story:
+    {rewritten_story}
+
+    Return ONE valid JSON object with these exact fields:
+    1) script
+    2) title
+    3) description
+    4) thumbnail_hf_prompt
+    5) thumbnail_unsplash_query
+
+    Requirements:
+    - script must be 20 to 30 lines, newline-separated, one spoken beat per line.
+    - script must stay first person and preserve the original emotional arc.
+    - script lines should be concise (roughly 4 to 12 words each).
+    - no labels like Hook/Intro/Outro and no call-to-action line.
+    - title should be 40-60 characters and click-worthy.
+    - description should be 100-200 characters and include 3-4 hashtags.
+    - thumbnail_hf_prompt should be 20-30 words, focused on concrete scene elements.
+    - thumbnail_unsplash_query should be 2-4 words.
+    - do not output markdown fences or extra keys.
+    """
+
+
+def _build_content_package_from_story(topic, story, model, max_tokens, retries):
+    story_body = str(story.get("body", "")).strip()
+    source_title = str(story.get("title", "")).strip()
+    source_link = str(story.get("permalink", "")).strip()
+
+    for attempt in range(retries):
+        try:
+            rewritten_story = _rewrite_story_to_immersive_first_person(story_body, model)
+            if not rewritten_story:
+                raise ValueError("Rewritten story was empty")
+
+            package_prompt = _build_story_content_package_prompt(
+                topic=topic,
+                rewritten_story=rewritten_story,
+                source_title=source_title,
+                source_link=source_link,
+            )
+            response_content = _create_json_completion(
+                prompt=package_prompt,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=0.7,
+            )
+
+            content_package = _parse_json_response(response_content)
+            required_fields = ["script", "title", "description", "thumbnail_hf_prompt", "thumbnail_unsplash_query"]
+            missing_fields = [field for field in required_fields if field not in content_package]
+            if missing_fields:
+                raise ValueError(f"Missing required fields in response: {missing_fields}")
+
+            content_package["script"] = filter_instructional_labels(content_package["script"])
+            if source_link:
+                content_package["source_story_permalink"] = source_link
+            if source_title:
+                content_package["source_story_title"] = source_title
+
+            logger.info("Generated content package from Reddit story successfully")
+            return content_package
+        except Exception as exc:
+            logger.warning(
+                "Story-based package generation failed (attempt %s/%s): %s",
+                attempt + 1,
+                retries,
+                exc,
+            )
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+
+    return None
 
 def filter_instructional_labels(script):
     """
@@ -728,6 +904,22 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3)
     model = model or get_scitely_model()
     if is_scitely_disabled():
         logger.info("Scitely is disabled; comprehensive content generation will use NVIDIA")
+
+    story_source_mode = os.getenv("SHORTS_SCRIPT_SOURCE", "reddit").strip().lower()
+    if story_source_mode in {"reddit", "auto"}:
+        story = _fetch_source_story_from_reddit()
+        if story:
+            package = _build_content_package_from_story(
+                topic=topic,
+                story=story,
+                model=model,
+                max_tokens=max_tokens,
+                retries=retries,
+            )
+            if package:
+                return package
+        else:
+            logger.info("No Reddit story available; falling back to topic-based generation")
 
     # Current date for relevance
     from datetime import datetime
