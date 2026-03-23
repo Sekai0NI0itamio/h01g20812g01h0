@@ -56,7 +56,8 @@ def _load_token_credentials(token_path):
     # Fallback: token path may be .pickle but content could be JSON.
     try:
         with open(token_path, "r", encoding="utf-8") as token_file:
-            payload = json.load(token_file)
+            raw = token_file.read().strip()
+        payload = json.loads(raw)
         return Credentials.from_authorized_user_info(payload, SCOPES)
     except Exception:
         return None
@@ -78,6 +79,9 @@ def _is_non_interactive_environment():
 
 def authenticate_youtube():
     credentials = None
+
+    if REQUESTS_SESSION.proxies:
+        print(f"🔐 YouTube auth requests using proxy: {REQUESTS_SESSION.proxies.get('https')}")
 
     # Load existing credentials if available
     if os.path.exists(TOKEN_FILE):

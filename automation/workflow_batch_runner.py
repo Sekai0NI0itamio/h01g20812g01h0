@@ -151,6 +151,11 @@ def ensure_thumbnail(video_path: Path, thumbnail_path: str | None, out_dir: Path
     return generated
 
 
+def find_latest_generated_video(output_dir: Path) -> Path | None:
+    candidates = sorted(output_dir.glob("yt_shorts_*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
 def copy_artifacts(index: int, topic: str, video_path: Path, script_path: Path, thumbnail_path: Path, artifacts_root: Path) -> None:
     safe_topic = re.sub(r"[^A-Za-z0-9._-]+", "_", topic).strip("_")[:50] or f"topic_{index:03d}"
     item_dir = artifacts_root / f"{index:03d}_{safe_topic}"
@@ -219,7 +224,16 @@ def main() -> int:
         )
 
         if not video_path_str:
-            raise RuntimeError(f"Video generation failed for item {index}")
+            latest_video = find_latest_generated_video(output_dir)
+            if latest_video:
+                logger.warning(
+                    "Primary video path missing for item %s, using latest generated video fallback: %s",
+                    index,
+                    latest_video,
+                )
+                video_path_str = str(latest_video)
+            else:
+                raise RuntimeError(f"Video generation failed for item {index}")
 
         video_path = Path(video_path_str).resolve()
         script_path = derive_script_path(video_path)

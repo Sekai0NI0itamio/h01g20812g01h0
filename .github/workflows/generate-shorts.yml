@@ -108,6 +108,7 @@ jobs:
         env:
           YOUTUBE_CLIENT_SECRET_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}
           YOUTUBE_TOKEN_PICKLE_B64: ${{ secrets.YOUTUBE_TOKEN_PICKLE_B64 }}
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
         run: |
           set -e
           mkdir -p automation/credentials
@@ -118,12 +119,19 @@ jobs:
           fi
 
           if [ -n "$YOUTUBE_TOKEN_PICKLE_B64" ]; then
-            if printf '%s' "$YOUTUBE_TOKEN_PICKLE_B64" | base64 --decode > automation/credentials/token.pickle 2>/dev/null; then
+            token_trimmed="$(printf '%s' "$YOUTUBE_TOKEN_PICKLE_B64" | sed -e 's/^\s*//' -e 's/\s*$//')"
+            if printf '%s' "$token_trimmed" | grep -q '^{' ; then
+              printf '%s' "$token_trimmed" > automation/credentials/token.json
+              echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.json" >> "$GITHUB_ENV"
+            elif printf '%s' "$token_trimmed" | base64 --decode > automation/credentials/token.pickle 2>/dev/null; then
               echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.pickle" >> "$GITHUB_ENV"
             else
-              printf '%s' "$YOUTUBE_TOKEN_PICKLE_B64" > automation/credentials/token.json
+              printf '%s' "$token_trimmed" > automation/credentials/token.json
               echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.json" >> "$GITHUB_ENV"
             fi
+          elif [ -n "$YOUTUBE_TOKEN_JSON" ]; then
+            printf '%s' "$YOUTUBE_TOKEN_JSON" > automation/credentials/token.json
+            echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.json" >> "$GITHUB_ENV"
           fi
 
       - name: Generate shorts sequentially

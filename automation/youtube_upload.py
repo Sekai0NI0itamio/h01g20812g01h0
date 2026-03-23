@@ -55,6 +55,10 @@ def get_authenticated_service():
     """Load YouTube API credentials."""
     credentials = authenticate_youtube()
     proxy_info = get_httplib2_proxy_info()
+    if proxy_info:
+        logger.info("YouTube upload requests will use Tor SOCKS proxy")
+    else:
+        logger.info("YouTube upload requests will bypass Tor proxy")
     authed_http = AuthorizedHttp(credentials, http=httplib2.Http(proxy_info=proxy_info)) if proxy_info else AuthorizedHttp(credentials)
     return googleapiclient.discovery.build("youtube", "v3", http=authed_http, cache_discovery=False)
 
