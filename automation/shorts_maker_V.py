@@ -32,8 +32,10 @@ from helper.shorts_assets import (
     add_anime_greenscreen_overlay_to_video,
     add_background_music_to_video,
     build_brainrot_overlay_clip,
+    pick_random_background_music,
     pick_random_brainrot_video,
     pick_random_brainrot_start_time,
+    pick_random_greenscreen_video,
 )
 from automation.parallel_tasks import ParallelTaskExecutor
 from automation.renderer import render_video
@@ -482,6 +484,11 @@ class YTShortsCreator_V:
             render_temp_dir = os.path.join(self.temp_dir, "render")
             os.makedirs(render_temp_dir, exist_ok=True)
 
+            # Preselect post-process assets while rendering is running.
+            asset_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            music_future = asset_pool.submit(pick_random_background_music)
+            greenscreen_future = asset_pool.submit(pick_random_greenscreen_video)
+
             # Use the unified rendering interface
             output_path = render_video(
                 clips=section_clips,
@@ -512,18 +519,27 @@ class YTShortsCreator_V:
 
             # Add background music as a post-process
             if output_path and os.path.exists(output_path):
+                selected_music = music_future.result() if music_future else None
                 output_path = add_background_music_to_video(
                     output_path,
+                    selected_music_path=selected_music,
                     fps=self.fps,
                     preset="ultrafast",
                 )
 
             # Add a random green-screen anime girl overlay as a final post-process.
             if output_path and os.path.exists(output_path):
+                selected_overlay = greenscreen_future.result() if greenscreen_future else None
                 output_path = add_anime_greenscreen_overlay_to_video(
                     output_path,
+                    selected_overlay_path=selected_overlay,
                     preset="ultrafast",
                 )
+
+            try:
+                asset_pool.shutdown(wait=False)
+            except Exception:
+                pass
 
             # Add dynamic auto-captions after final composition and overlays.
             if output_path and os.path.exists(output_path) and os.getenv("AUTO_CAPTIONS_ENABLED", "true").lower() == "true":

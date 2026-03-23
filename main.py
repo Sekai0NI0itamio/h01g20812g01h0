@@ -1,8 +1,10 @@
 import os # for environment variables and file paths
 import sys # for stdout encoding
 import argparse
+import concurrent.futures
 import logging # for logging events
 import logging.handlers # Import handlers
+import json
 from pathlib import Path # for file paths and directory creation
 from dotenv import load_dotenv # for loading environment variables
 import datetime # for timestamp
@@ -69,6 +71,67 @@ root_logger.addHandler(console_handler)
 
 # Use the root logger for this module
 logger = logging.getLogger(__name__)
+
+
+def _chunk_text_for_script_beats(text, min_lines=8, max_lines=16):
+    """Create readable line beats from a paragraph when the model returns too few script lines."""
+    raw_words = [w for w in str(text or "").replace("\n", " ").split(" ") if w.strip()]
+    if not raw_words:
+        return ""
+
+    target_lines = max(min_lines, min(max_lines, max(1, len(raw_words) // 8)))
+    words_per_line = max(4, min(12, max(1, len(raw_words) // target_lines)))
+
+    lines = []
+    for i in range(0, len(raw_words), words_per_line):
+        lines.append(" ".join(raw_words[i:i + words_per_line]).strip())
+
+    if len(lines) < min_lines and len(raw_words) >= min_lines * 4:
+        # Retry with shorter chunks to increase parallelizable sections.
+        words_per_line = max(4, words_per_line - 2)
+        lines = []
+        for i in range(0, len(raw_words), words_per_line):
+            lines.append(" ".join(raw_words[i:i + words_per_line]).strip())
+
+    return "\n".join([ln for ln in lines if ln]).strip()
+
+
+def _generate_thumbnail_job(output_dir, safe_title, timestamp, title, script_cards, thumbnail_image_prompt, thumbnail_unsplash_query, style):
+    """Background thumbnail generation task so render path is not blocked."""
+    try:
+        thumbnail_dir = os.path.join(output_dir, "thumbnails")
+        os.makedirs(thumbnail_dir, exist_ok=True)
+        thumbnail_generator = ThumbnailGenerator(output_dir=thumbnail_dir)
+
+        safe_title_thumbnail = safe_title[:20]
+        thumbnail_output_path = os.path.join(
+            thumbnail_dir,
+            f"thumbnail_{safe_title_thumbnail}_{timestamp}.jpg"
+        )
+
+        thumbnail_path = thumbnail_generator.generate_thumbnail(
+            title=title,
+            script_sections=script_cards,
+            prompt=thumbnail_image_prompt,
+            style=style,
+            output_path=thumbnail_output_path
+        )
+
+        if not thumbnail_path:
+            logger.info(f"Attempting with Unsplash query: {thumbnail_unsplash_query}")
+            downloaded = thumbnail_generator.fetch_image_unsplash(thumbnail_unsplash_query)
+            if downloaded:
+                thumbnail_path = thumbnail_generator.create_thumbnail(
+                    title=title,
+                    image_path=downloaded,
+                    output_path=thumbnail_output_path
+                )
+
+        thumbnail_generator.cleanup()
+        return thumbnail_path
+    except Exception as thumbnail_error:
+        logger.error(f"Failed to generate thumbnail: {thumbnail_error}")
+        return None
 
 def get_creator_for_day():
     """Alternate between video and image creators based on day"""
@@ -156,8 +219,30 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         except Exception as script_write_error:
             logger.warning(f"Failed to save script file: {script_write_error}")
 
-        # Also generate a single narration audio file for the full paragraph (if provided)
-        if paragraph:
+        # Persist generated package metadata for downstream artifact upload jobs.
+        try:
+            metadata_output_filename = f"meta_{safe_title}_{timestamp}.json"
+            metadata_output_path = os.path.join(output_dir, metadata_output_filename)
+            with open(metadata_output_path, "w", encoding="utf-8") as meta_file:
+                json.dump(
+                    {
+                        "topic": topic,
+                        "title": title,
+                        "description": description,
+                        "thumbnail_hf_prompt": thumbnail_image_prompt,
+                        "thumbnail_unsplash_query": thumbnail_unsplash_query,
+                    },
+                    meta_file,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            logger.info(f"Saved content metadata to: {metadata_output_path}")
+        except Exception as metadata_write_error:
+            logger.warning(f"Failed to save content metadata file: {metadata_write_error}")
+
+        # Optional paragraph narration audio. Disabled by default to avoid duplicate TTS work.
+        generate_paragraph_audio = os.getenv("ENABLE_PARAGRAPH_NARRATION_AUDIO", "false").lower() == "true"
+        if paragraph and generate_paragraph_audio:
             try:
                 audio_helper = AudioHelper()
                 para_audio_path = os.path.join(output_dir, f"narration_paragraph_{safe_title}_{timestamp}.wav")
@@ -168,6 +253,16 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                     logger.warning("Failed to generate paragraph narration audio")
             except Exception as e:
                 logger.exception("Error generating paragraph narration audio: %s", e)
+        elif paragraph:
+            logger.info("Skipping paragraph narration audio generation (ENABLE_PARAGRAPH_NARRATION_AUDIO=false)")
+
+        # If script came back too short, derive beat lines from paragraph for better section parallelism.
+        raw_lines = [ln.strip() for ln in str(script or "").splitlines() if ln.strip()]
+        if len(raw_lines) < 4 and paragraph:
+            rebuilt_script = _chunk_text_for_script_beats(paragraph, min_lines=8, max_lines=16)
+            if rebuilt_script:
+                script = rebuilt_script
+                logger.info("Rebuilt short script into %s beat lines from paragraph", len([ln for ln in script.splitlines() if ln.strip()]))
 
         # Parse script into cards as before
         script_cards = parse_script_to_cards(script)
@@ -189,12 +284,39 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                 [f for f in os.listdir(sound_effects_dir) if f.lower().endswith(".mp3")]
             )
 
-        if sound_effect_files and script_cards:
-            sfx_plan = generate_sound_effect_plan(
-                script_lines=[card.get("text", "") for card in script_cards],
-                sound_effect_files=sound_effect_files,
-                topic=topic,
-            )
+        # Build SFX and meme plans concurrently (both are independent AI planning calls)
+        sfx_plan = []
+        meme_plan = []
+        if script_cards:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as planner_pool:
+                sfx_future = None
+                if sound_effect_files:
+                    sfx_future = planner_pool.submit(
+                        generate_sound_effect_plan,
+                        script_lines=[card.get("text", "") for card in script_cards],
+                        sound_effect_files=sound_effect_files,
+                        topic=topic,
+                    )
+
+                meme_future = planner_pool.submit(
+                    generate_meme_insertion_plan,
+                    script_lines=[card.get("text", "") for card in script_cards],
+                    topic=topic,
+                    min_insertions=5,
+                    max_insertions=11,
+                )
+
+                if sfx_future:
+                    try:
+                        sfx_plan = sfx_future.result()
+                    except Exception as plan_err:
+                        logger.warning("SFX plan generation failed: %s", plan_err)
+                try:
+                    meme_plan = meme_future.result()
+                except Exception as plan_err:
+                    logger.warning("Meme plan generation failed: %s", plan_err)
+
+        if sound_effect_files and script_cards and sfx_plan:
             for item in sfx_plan:
                 idx = item.get("line_index")
                 if isinstance(idx, int) and 0 <= idx < len(script_cards):
@@ -211,15 +333,8 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         else:
             logger.info("No SoundEffects/*.mp3 files found or no script cards; skipping sound effect planning")
 
-        # Meme insertion planning: 5 to 11 timed insertions with DuckDuckGo image fetch.
-        if script_cards:
-            meme_plan = generate_meme_insertion_plan(
-                script_lines=[card.get("text", "") for card in script_cards],
-                topic=topic,
-                min_insertions=5,
-                max_insertions=11,
-            )
-
+        # Meme insertion planning: apply pre-generated plan and fetch images.
+        if script_cards and meme_plan:
             for entry in meme_plan:
                 idx = entry.get("line_index")
                 if not isinstance(idx, int) or idx < 0 or idx >= len(script_cards):
@@ -246,6 +361,22 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                     for e in meme_plan
                 ],
             )
+
+        # Kick off thumbnail generation now so it runs in parallel with video rendering.
+        thumbnail_future = None
+        thumbnail_path = None
+        thumbnail_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        thumbnail_future = thumbnail_pool.submit(
+            _generate_thumbnail_job,
+            output_dir,
+            safe_title,
+            timestamp,
+            title,
+            script_cards,
+            thumbnail_image_prompt,
+            thumbnail_unsplash_query,
+            style,
+        )
 
         if creator_type is None:
             creator_type = get_creator_for_day()
@@ -297,51 +428,16 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
             edge_blur=False
         )
 
-        # Generate thumbnail for the short
-        thumbnail_path = None
+        # Resolve thumbnail result from concurrent generation task.
         try:
-            logger.info("Generating thumbnail for the short")
-            thumbnail_dir = os.path.join(output_dir, "thumbnails")
-            os.makedirs(thumbnail_dir, exist_ok=True)
-
-            # Initialize thumbnail generator
-            thumbnail_generator = ThumbnailGenerator(output_dir=thumbnail_dir)
-
-            # Generate thumbnail using the prompts from the content package
-            safe_title_thumbnail = safe_title[:20]  # Shorter version for thumbnail filename
-            thumbnail_output_path = os.path.join(
-                thumbnail_dir,
-                f"thumbnail_{safe_title_thumbnail}_{timestamp}.jpg"
-            )
-
-            # Use the specialized thumbnail prompts from content package
-            thumbnail_path = thumbnail_generator.generate_thumbnail(
-                title=title,  # Use the generated title
-                script_sections=script_cards,
-                prompt=thumbnail_image_prompt,
-                style=style,
-                output_path=thumbnail_output_path
-            )
-
-            # If thumbnail generation fails, try direct stock fetch with our query
-            if not thumbnail_path:
-                logger.info(f"Attempting with Unsplash query: {thumbnail_unsplash_query}")
-                thumbnail_path = thumbnail_generator.fetch_image_unsplash(thumbnail_unsplash_query)
-
-                if thumbnail_path:
-                    # Create thumbnail with the downloaded image
-                    thumbnail_path = thumbnail_generator.create_thumbnail(
-                        title=title,
-                        image_path=thumbnail_path,
-                        output_path=thumbnail_output_path
-                    )
-
+            if thumbnail_future:
+                thumbnail_path = thumbnail_future.result()
             logger.info(f"Thumbnail generated at: {thumbnail_path}")
-            thumbnail_generator.cleanup()
-
         except Exception as thumbnail_error:
-            logger.error(f"Failed to generate thumbnail: {thumbnail_error}")
-            # Continue without thumbnail if generation fails
+            logger.error(f"Failed to resolve thumbnail generation task: {thumbnail_error}")
+        finally:
+            if thumbnail_pool:
+                thumbnail_pool.shutdown(wait=False)
 
         # Optional: YouTube Upload
         if should_auto_upload(auto_upload):

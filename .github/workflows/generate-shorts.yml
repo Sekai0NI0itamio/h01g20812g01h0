@@ -47,13 +47,13 @@ jobs:
       PYTHONUNBUFFERED: "1"
       USE_C05_LOCAL_KEYS: "false"
       SHORTS_SOURCE_STORY: ${{ inputs.story_text }}
-      ENABLE_YOUTUBE_UPLOAD: ${{ inputs.upload_to_youtube }}
+      ENABLE_YOUTUBE_UPLOAD: "false"
       ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
       TOR_PROXY_URL: socks5h://127.0.0.1:9050
       AI_USE_TOR_TUNNEL: "false"
       IMAGE_SEARCH_USE_TOR_TUNNEL: "false"
 
-      AI_PROVIDER: auto
+      AI_PROVIDER: nvidia
       SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
       SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
       SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
@@ -77,6 +77,9 @@ jobs:
       TTS_REGENERATION_PASSES: "2"
       TTS_RETRY_BACKOFF_SECONDS: "1.0"
       SHORTS_TTS_MAX_WORKERS: "4"
+      ENABLE_PARAGRAPH_NARRATION_AUDIO: "false"
+      AUTO_CAPTIONS_FAST_MODE: "true"
+      AUTO_CAPTIONS_MAX_CHUNKS: "18"
 
       SHORTS_MUSIC_DIR: Music
       SHORTS_BRAINROT_DIR: AttentionGrabBrainRotVideos
@@ -136,8 +139,75 @@ jobs:
           echo "RENDER_FFMPEG_THREADS=1" >> "$GITHUB_ENV"
           echo "Render tuning: workers=$cores ffmpeg_threads=1"
 
-      - name: Prepare optional YouTube credentials
-        if: ${{ inputs.upload_to_youtube }}
+      - name: Generate shorts sequentially
+        run: |
+          python -m automation.workflow_batch_runner \
+            --count "${{ inputs.video_count }}" \
+            --topic-direction "${{ inputs.topic_direction }}" \
+            --creator "${{ inputs.creator_mode }}" \
+            --upload-to-youtube "false" \
+            --artifacts-dir "workflow_artifacts"
+
+      - name: Upload generated artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-shorts-${{ github.run_id }}
+          path: workflow_artifacts
+          if-no-files-found: error
+
+  upload-to-youtube:
+    if: ${{ inputs.upload_to_youtube }}
+    needs: generate-shorts
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: "1"
+      ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
+      TOR_PROXY_URL: socks5h://127.0.0.1:9050
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install and start Tor tunnel
+        if: ${{ inputs.use_tor_tunnel }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor netcat-openbsd
+          if nc -z 127.0.0.1 9050; then
+            echo "Tor SOCKS proxy already available on 127.0.0.1:9050"
+            exit 0
+          fi
+
+          sudo service tor start || sudo systemctl start tor || true
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 9050; then
+              echo "Tor SOCKS proxy is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Tor failed to start or bind 127.0.0.1:9050"
+          sudo service tor status || true
+          exit 1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download generated artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-shorts-${{ github.run_id }}
+          path: workflow_artifacts
+
+      - name: Prepare YouTube credentials
         env:
           YOUTUBE_CLIENT_SECRET_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}
           YOUTUBE_TOKEN_PICKLE_B64: ${{ secrets.YOUTUBE_TOKEN_PICKLE_B64 }}
@@ -167,19 +237,6 @@ jobs:
             echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.json" >> "$GITHUB_ENV"
           fi
 
-      - name: Generate shorts sequentially
+      - name: Upload artifacts to YouTube
         run: |
-          python -m automation.workflow_batch_runner \
-            --count "${{ inputs.video_count }}" \
-            --topic-direction "${{ inputs.topic_direction }}" \
-            --creator "${{ inputs.creator_mode }}" \
-            --upload-to-youtube "${{ inputs.upload_to_youtube }}" \
-            --artifacts-dir "workflow_artifacts"
-
-      - name: Upload generated artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: generated-shorts-${{ github.run_id }}
-          path: workflow_artifacts
-          if-no-files-found: error
+          python -m automation.upload_artifacts_to_youtube --artifacts-dir workflow_artifacts

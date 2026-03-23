@@ -131,6 +131,14 @@ def derive_script_path(video_path: Path) -> Path:
     return video_path.with_suffix(".txt")
 
 
+def derive_meta_path(video_path: Path) -> Path:
+    name = video_path.name
+    if name.startswith("yt_shorts_") and name.lower().endswith(".mp4"):
+        suffix = name[len("yt_shorts_") : -4]
+        return video_path.with_name(f"meta_{suffix}.json")
+    return video_path.with_suffix(".json")
+
+
 def ensure_thumbnail(video_path: Path, thumbnail_path: str | None, out_dir: Path) -> Path:
     if thumbnail_path and Path(thumbnail_path).exists():
         return Path(thumbnail_path)
@@ -156,7 +164,7 @@ def find_latest_generated_video(output_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def copy_artifacts(index: int, topic: str, video_path: Path, script_path: Path, thumbnail_path: Path, artifacts_root: Path) -> None:
+def copy_artifacts(index: int, topic: str, video_path: Path, script_path: Path, thumbnail_path: Path, artifacts_root: Path, meta_path: Path | None = None) -> None:
     safe_topic = re.sub(r"[^A-Za-z0-9._-]+", "_", topic).strip("_")[:50] or f"topic_{index:03d}"
     item_dir = artifacts_root / f"{index:03d}_{safe_topic}"
     item_dir.mkdir(parents=True, exist_ok=True)
@@ -172,6 +180,16 @@ def copy_artifacts(index: int, topic: str, video_path: Path, script_path: Path, 
         "script_source": str(script_path),
         "thumbnail_source": str(thumbnail_path),
     }
+
+    if meta_path and meta_path.exists():
+        try:
+            generated_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(generated_meta, dict):
+                metadata.update(generated_meta)
+            shutil.copy2(meta_path, item_dir / "content_meta.json")
+        except Exception as exc:
+            logger.warning("Failed to merge generated metadata from %s: %s", meta_path, exc)
+
     (item_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
@@ -248,6 +266,7 @@ def main() -> int:
 
         video_path = Path(video_path_str).resolve()
         script_path = derive_script_path(video_path)
+        meta_path = derive_meta_path(video_path)
 
         if not video_path.exists():
             raise FileNotFoundError(f"Missing generated video: {video_path}")
@@ -258,7 +277,7 @@ def main() -> int:
         if not thumb_path.exists():
             raise FileNotFoundError(f"Missing generated thumbnail: {thumb_path}")
 
-        copy_artifacts(index, topic, video_path, script_path, thumb_path, artifacts_root)
+        copy_artifacts(index, topic, video_path, script_path, thumb_path, artifacts_root, meta_path=meta_path)
 
     logger.info("Batch run completed. Artifacts directory: %s", artifacts_root)
     return 0

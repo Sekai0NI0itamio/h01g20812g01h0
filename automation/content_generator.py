@@ -27,15 +27,41 @@ REDDIT_REWRITE_SYSTEM_PROMPT = (
     "the reader feel like they are inside the narrator's head. Use a natural, conversational tone that "
     "matches the original voice. Keep the pacing tight-show, don't just tell. If the original has dialogue, "
     "keep it but make it feel vivid. The goal is to turn a raw anecdote into a short, engaging narrative "
-    "that captures the emotional arc (confusion, embarrassment, realization, etc.) as it unfolded in real time."
+    "that captures the emotional arc (confusion, embarrassment, realization, etc.) as it unfolded in real time. "
+    "Use plain everyday words only and avoid literary or poetic descriptors. "
+    "Minor grammar imperfections are acceptable if the flow feels natural. "
+    "Prefer connecting ideas with the word 'and' and avoid commas as much as possible."
 )
 
 REDDIT_REWRITE_USER_TEMPLATE = (
     "Here is the story:\n\n{story}\n\n"
     "Rewrite this as a single, focused paragraph in first-person perspective.\n"
     "Keep all key events and details, enhance emotional texture and sensory moments, and use a natural, conversational tone.\n"
+    "Use simple non-literary wording and keep it fluid even if grammar is not perfect.\n"
+    "Connect ideas using 'and' and avoid commas.\n"
+    "End with a call for comments, like: Comment what you think about this down in the comments.\n"
     "Return exactly one paragraph (no lists or line breaks)."
 )
+
+
+def _normalize_paragraph_narration_style(paragraph_text):
+    """Normalize paragraph style for narration constraints requested by user."""
+    text = str(paragraph_text or "").strip().replace("\n", " ")
+    if not text:
+        return text
+
+    # Enforce no commas; prefer simple "and" flow.
+    text = text.replace(",", " and")
+    text = re.sub(r"\s+", " ", text).strip()
+
+    cta = "Comment what you think about this down in the comments"
+    lowered = text.lower()
+    if "comment" not in lowered or "comments" not in lowered:
+        if text and text[-1] not in ".!?":
+            text += "."
+        text += f" {cta}."
+
+    return text
 
 
 def _load_script_template():
@@ -228,6 +254,10 @@ def _build_story_content_package_prompt(topic, rewritten_story, source_title="",
 
     Requirements:
     - paragraph must be exactly one paragraph (no internal line breaks) in first-person.
+    - paragraph must use plain, everyday words and avoid literary/descriptive flourish.
+    - paragraph may include minor grammar imperfections if it sounds natural.
+    - paragraph should connect ideas with "and" and avoid commas.
+    - paragraph should end with a comment CTA line such as "Comment what you think about this down in the comments."
     - script must be derived from the paragraph (break the paragraph into concise caption-sized beats).
     - script should be 8 to 16 lines, one caption/beat per line, each 4-12 words.
     - script must preserve the emotional arc and refer directly to the content of the paragraph.
@@ -279,7 +309,7 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries):
                 raise ValueError(f"Missing required fields in response: {missing_fields}")
 
             # Ensure paragraph is a single paragraph and strip unnecessary whitespace
-            paragraph = str(content_package.get("paragraph", "") or "").strip().replace("\n", " ")
+            paragraph = _normalize_paragraph_narration_style(content_package.get("paragraph", ""))
             content_package["paragraph"] = paragraph
 
             # Clean script lines but ensure they are derived from the paragraph

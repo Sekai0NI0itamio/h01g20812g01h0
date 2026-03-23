@@ -154,11 +154,11 @@ def _build_looped_audio_clip(audio_path, duration):
     return looped_audio
 
 
-def add_background_music_to_video(video_path, music_dir=None, volume_scale=None, fps=30, preset="ultrafast"):
+def add_background_music_to_video(video_path, music_dir=None, selected_music_path=None, volume_scale=None, fps=30, preset="ultrafast"):
     if not video_path or not os.path.exists(video_path):
         return video_path
 
-    music_path = pick_random_background_music(music_dir)
+    music_path = selected_music_path or pick_random_background_music(music_dir)
     if not music_path:
         return video_path
 
@@ -223,6 +223,7 @@ def add_background_music_to_video(video_path, music_dir=None, volume_scale=None,
 def add_anime_greenscreen_overlay_to_video(
     video_path,
     greenscreen_dir=None,
+    selected_overlay_path=None,
     scale_factor=0.6929,
     chroma_similarity=None,
     chroma_blend=None,
@@ -235,7 +236,7 @@ def add_anime_greenscreen_overlay_to_video(
     if not video_path or not os.path.exists(video_path):
         return video_path
 
-    overlay_video_path = pick_random_greenscreen_video(greenscreen_dir)
+    overlay_video_path = selected_overlay_path or pick_random_greenscreen_video(greenscreen_dir)
     if not overlay_video_path:
         return video_path
 
@@ -294,8 +295,19 @@ def add_anime_greenscreen_overlay_to_video(
         return video_path
 
 
-def _chunk_caption_words(words):
+def _chunk_caption_words(words, fast_mode=False):
     """Build 2-3 word chunks for readable fast captions."""
+    if fast_mode:
+        # Fewer, larger chunks reduce render overhead significantly.
+        chunks = []
+        i = 0
+        while i < len(words):
+            remaining = len(words) - i
+            take = 5 if remaining > 6 else remaining
+            chunks.append(words[i:i + take])
+            i += take
+        return chunks
+
     chunks = []
     i = 0
     use_three = True
@@ -315,6 +327,8 @@ def _chunk_caption_words(words):
 
 
 def _build_caption_timeline(script_sections):
+    fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
+    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "18")))
     timeline = []
     cursor = 0.0
     for section in script_sections or []:
@@ -329,7 +343,7 @@ def _build_caption_timeline(script_sections):
             cursor += duration
             continue
 
-        chunks = _chunk_caption_words(words)
+        chunks = _chunk_caption_words(words, fast_mode=fast_mode)
         part_count = max(1, len(chunks))
         part_duration = duration / part_count
         section_cursor = cursor
@@ -345,6 +359,13 @@ def _build_caption_timeline(script_sections):
             )
             section_cursor += chunk_duration
         cursor += duration
+
+        if len(timeline) >= max_chunks:
+            break
+
+    if len(timeline) > max_chunks:
+        timeline = timeline[:max_chunks]
+
     return timeline
 
 
@@ -422,7 +443,8 @@ def add_dynamic_auto_captions_to_video(
         logger.warning("No caption timeline generated; skipping auto captions")
         return video_path
 
-    color_map = _get_gpt_caption_colors(script_sections)
+    fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
+    color_map = {} if fast_mode else _get_gpt_caption_colors(script_sections)
     palette = ["#FFD54F", "#4FC3F7", "#FF8A80", "#A5D6A7", "#CE93D8", "#FFB74D"]
 
     base_clip = None
@@ -448,44 +470,58 @@ def add_dynamic_auto_captions_to_video(
             if not highlight:
                 highlight = palette[idx % len(palette)]
 
-            # Outer glow layer
-            glow = TextClip(
-                text=text,
-                font=font_path,
-                font_size=font_size,
-                color=highlight,
-                stroke_color=highlight,
-                stroke_width=8,
-                method="caption",
-                size=(int(base_clip.w * 0.9), None),
-            ).with_start(start).with_duration(duration).with_position(("center", center_y)).with_opacity(0.22)
+            if fast_mode:
+                # Single-layer captions for faster composition.
+                core = TextClip(
+                    text=text,
+                    font=font_path,
+                    font_size=font_size,
+                    color="#FFFFFF",
+                    stroke_color=highlight,
+                    stroke_width=3,
+                    method="caption",
+                    size=(int(base_clip.w * 0.9), None),
+                ).with_start(start).with_duration(duration).with_position(("center", center_y))
+                caption_layers.append(core)
+            else:
+                # Outer glow layer
+                glow = TextClip(
+                    text=text,
+                    font=font_path,
+                    font_size=font_size,
+                    color=highlight,
+                    stroke_color=highlight,
+                    stroke_width=8,
+                    method="caption",
+                    size=(int(base_clip.w * 0.9), None),
+                ).with_start(start).with_duration(duration).with_position(("center", center_y)).with_opacity(0.22)
 
-            # Main bold/fat readable layer
-            core = TextClip(
-                text=text,
-                font=font_path,
-                font_size=font_size,
-                color="#FFFFFF",
-                stroke_color=highlight,
-                stroke_width=4,
-                method="caption",
-                size=(int(base_clip.w * 0.9), None),
-            ).with_start(start).with_duration(duration).with_position(("center", center_y))
+                # Main bold/fat readable layer
+                core = TextClip(
+                    text=text,
+                    font=font_path,
+                    font_size=font_size,
+                    color="#FFFFFF",
+                    stroke_color=highlight,
+                    stroke_width=4,
+                    method="caption",
+                    size=(int(base_clip.w * 0.9), None),
+                ).with_start(start).with_duration(duration).with_position(("center", center_y))
 
-            # Quick shimmer pass to simulate a shine sweep
-            shine_dur = max(0.12, min(0.28, duration * 0.35))
-            shine = TextClip(
-                text=text,
-                font=font_path,
-                font_size=font_size,
-                color="#FFFFFF",
-                stroke_color="#FFFFFF",
-                stroke_width=2,
-                method="caption",
-                size=(int(base_clip.w * 0.9), None),
-            ).with_start(start + min(0.08, duration * 0.2)).with_duration(shine_dur).with_position(("center", center_y - 1)).with_opacity(0.55)
+                # Quick shimmer pass to simulate a shine sweep
+                shine_dur = max(0.12, min(0.28, duration * 0.35))
+                shine = TextClip(
+                    text=text,
+                    font=font_path,
+                    font_size=font_size,
+                    color="#FFFFFF",
+                    stroke_color="#FFFFFF",
+                    stroke_width=2,
+                    method="caption",
+                    size=(int(base_clip.w * 0.9), None),
+                ).with_start(start + min(0.08, duration * 0.2)).with_duration(shine_dur).with_position(("center", center_y - 1)).with_opacity(0.55)
 
-            caption_layers.extend([glow, core, shine])
+                caption_layers.extend([glow, core, shine])
 
         composited = CompositeVideoClip(caption_layers, size=(base_clip.w, base_clip.h)).with_duration(base_clip.duration)
         if base_clip.audio:
