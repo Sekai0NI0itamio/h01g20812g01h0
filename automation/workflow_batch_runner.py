@@ -12,6 +12,7 @@ from automation.scitely_client import (
     create_chat_completion,
     get_default_chat_provider,
     get_scitely_model,
+    select_working_provider_for_run,
 )
 from helper.minor_helper import ensure_output_directory
 from main import creator_from_choice, generate_youtube_short
@@ -201,6 +202,9 @@ def main() -> int:
     logger.info("Topic direction: %s", args.topic_direction or "(auto)")
     logger.info("Creator mode: %s", args.creator)
     logger.info("YouTube upload: %s", upload_to_youtube)
+
+    selected_provider = select_working_provider_for_run()
+    logger.info("AI provider locked for this run: %s", selected_provider)
 
     for index in range(1, args.count + 1):
         topic = generate_auto_topic(args.topic_direction, index, used_topics)

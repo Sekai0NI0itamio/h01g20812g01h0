@@ -45,6 +45,7 @@ nltk==3.9.1
 numpy==2.2.3
 oauthlib==3.2.2
 openai==1.61.1
+g4f
 opencv-python==4.11.0.86
 packaging==24.2
 pathspec==0.12.1
