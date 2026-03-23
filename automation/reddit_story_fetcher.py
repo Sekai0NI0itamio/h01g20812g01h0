@@ -10,17 +10,96 @@ import os
 import random
 from typing import Any, Dict, Optional
 
+import requests
+
 SUBREDDIT_URL = "https://www.reddit.com/r/stories/"
 TIMEOUT_MS = int(os.getenv("REDDIT_FETCH_TIMEOUT_MS", "45000"))
 FETCH_RETRIES = max(1, int(os.getenv("REDDIT_FETCH_RETRIES", "3")))
 FETCH_SCROLL_ROUNDS = max(1, int(os.getenv("REDDIT_FETCH_SCROLL_ROUNDS", "4")))
 FETCH_DEBUG = os.getenv("REDDIT_FETCH_DEBUG", "true").strip().lower() == "true"
+REDDIT_JSON_TIMEOUT_S = int(os.getenv("REDDIT_JSON_TIMEOUT_S", "25"))
+REDDIT_API_FIRST = os.getenv("REDDIT_API_FIRST", "false").strip().lower() == "true"
+
+REDDIT_JSON_ENDPOINTS = [
+    "https://www.reddit.com/r/stories/hot.json?limit=100&raw_json=1",
+    "https://old.reddit.com/r/stories/hot.json?limit=100&raw_json=1",
+]
 
 logger = logging.getLogger(__name__)
 
 
 def _clean_text(value: Optional[str]) -> str:
     return " ".join(str(value or "").split()).strip()
+
+
+def _looks_like_block_page(text: str) -> bool:
+    hay = _clean_text(text).lower()
+    if not hay:
+        return False
+    block_markers = [
+        "you've been blocked by network security",
+        "you have been blocked by network security",
+        "to continue, log in to your reddit account",
+        "file a ticket",
+    ]
+    return any(marker in hay for marker in block_markers)
+
+
+def _fetch_random_story_via_reddit_json(timeout_s: int = REDDIT_JSON_TIMEOUT_S, debug: bool = False) -> Optional[Dict[str, Any]]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    for endpoint in REDDIT_JSON_ENDPOINTS:
+        try:
+            if debug:
+                logger.info("[reddit-fetch-json] requesting endpoint=%s", endpoint)
+            resp = requests.get(endpoint, headers=headers, timeout=timeout_s)
+            if resp.status_code != 200:
+                if debug:
+                    logger.info("[reddit-fetch-json] non-200 status=%s endpoint=%s", resp.status_code, endpoint)
+                continue
+
+            payload = resp.json()
+            posts = (((payload or {}).get("data") or {}).get("children") or [])
+            candidates = []
+            for post in posts:
+                data = (post or {}).get("data") or {}
+                body = _clean_text(data.get("selftext", ""))
+                if not body:
+                    continue
+                if data.get("stickied"):
+                    continue
+                permalink = str(data.get("permalink", "")).strip()
+                if not permalink:
+                    continue
+                if not permalink.startswith("http"):
+                    permalink = f"https://www.reddit.com{permalink}"
+
+                candidates.append(
+                    {
+                        "title": _clean_text(data.get("title", "")) or "Untitled story",
+                        "body": body,
+                        "permalink": permalink,
+                        "subreddit_url": SUBREDDIT_URL,
+                    }
+                )
+
+            if candidates:
+                chosen = random.choice(candidates)
+                if debug:
+                    logger.info("[reddit-fetch-json] selected story permalink=%s body_chars=%s", chosen.get("permalink"), len(chosen.get("body", "")))
+                return chosen
+
+        except Exception as exc:
+            if debug:
+                logger.info("[reddit-fetch-json] endpoint failed endpoint=%s error=%s", endpoint, exc)
+
+    return None
 
 
 async def fetch_random_story(
@@ -30,6 +109,11 @@ async def fetch_random_story(
     scroll_rounds: int = FETCH_SCROLL_ROUNDS,
     debug: bool = FETCH_DEBUG,
 ) -> Optional[Dict[str, Any]]:
+    if REDDIT_API_FIRST:
+        json_story = _fetch_random_story_via_reddit_json(debug=debug)
+        if json_story:
+            return json_story
+
     try:
         from playwright.async_api import async_playwright
     except Exception as exc:
@@ -54,6 +138,14 @@ async def fetch_random_story(
             await page.goto(subreddit_url, timeout=timeout_ms, wait_until="domcontentloaded")
             await page.wait_for_load_state("networkidle", timeout=timeout_ms)
             await _log_page_snapshot(page, "subreddit-initial", debug=debug)
+
+            initial_body_text = await _get_body_text(page)
+            if _looks_like_block_page(initial_body_text):
+                logger.warning("[reddit-fetch] browser page appears blocked; falling back to Reddit JSON endpoint")
+                fallback_story = _fetch_random_story_via_reddit_json(debug=debug)
+                if fallback_story:
+                    return fallback_story
+
             await page.wait_for_selector("shreddit-post", timeout=timeout_ms)
 
             for _ in range(max(0, int(scroll_rounds))):
@@ -164,12 +256,7 @@ async def _log_page_snapshot(page, label: str, debug: bool = False) -> None:
 
     text_content = ""
     html_content = ""
-    try:
-        body = await page.query_selector("body")
-        if body:
-            text_content = await body.inner_text()
-    except Exception:
-        text_content = ""
+    text_content = await _get_body_text(page)
 
     try:
         html_content = await page.content()
@@ -185,6 +272,16 @@ async def _log_page_snapshot(page, label: str, debug: bool = False) -> None:
         logger.info("[reddit-fetch:%s] visible_text_full_start", label)
         logger.info(cleaned)
         logger.info("[reddit-fetch:%s] visible_text_full_end", label)
+
+
+async def _get_body_text(page) -> str:
+    try:
+        body = await page.query_selector("body")
+        if body:
+            return await body.inner_text()
+    except Exception:
+        return ""
+    return ""
 
 
 def fetch_random_story_sync(
