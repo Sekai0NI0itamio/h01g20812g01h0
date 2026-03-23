@@ -5,6 +5,7 @@ This module exposes both async and sync helpers for reuse in the generation pipe
 """
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -23,6 +24,7 @@ REDDIT_API_FIRST = os.getenv("REDDIT_API_FIRST", "false").strip().lower() == "tr
 REDDIT_JSON_ENDPOINTS = [
     "https://www.reddit.com/r/stories/hot.json?limit=100&raw_json=1",
     "https://old.reddit.com/r/stories/hot.json?limit=100&raw_json=1",
+    "https://www.reddit.com/r/stories/.json?limit=100&raw_json=1",
 ]
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,90 @@ def _fetch_random_story_via_reddit_json(timeout_s: int = REDDIT_JSON_TIMEOUT_S, 
     return None
 
 
+def _extract_story_candidates_from_json_payload(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
+    posts = (((payload or {}).get("data") or {}).get("children") or [])
+    candidates = []
+
+    for post in posts:
+        data = (post or {}).get("data") or {}
+        body = _clean_text(data.get("selftext", ""))
+        if not body:
+            continue
+        if data.get("stickied"):
+            continue
+
+        permalink = str(data.get("permalink", "")).strip()
+        if not permalink:
+            continue
+        if not permalink.startswith("http"):
+            permalink = f"https://www.reddit.com{permalink}"
+
+        candidates.append(
+            {
+                "title": _clean_text(data.get("title", "")) or "Untitled story",
+                "body": body,
+                "permalink": permalink,
+                "subreddit_url": SUBREDDIT_URL,
+            }
+        )
+
+    return candidates
+
+
+async def _fetch_random_story_via_browser_json(page, timeout_ms: int, debug: bool = False) -> Optional[Dict[str, Any]]:
+    for endpoint in REDDIT_JSON_ENDPOINTS:
+        try:
+            if debug:
+                logger.info("[reddit-fetch-browser-json] opening endpoint in browser=%s", endpoint)
+
+            await page.goto(endpoint, timeout=timeout_ms, wait_until="domcontentloaded")
+            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
+            await _log_page_snapshot(page, "browser-json", debug=debug)
+
+            body_text = _clean_text(await _get_body_text(page))
+            if _looks_like_block_page(body_text):
+                if debug:
+                    logger.info("[reddit-fetch-browser-json] blocked content detected endpoint=%s", endpoint)
+                continue
+
+            parsed_payload = None
+            try:
+                parsed_payload = json.loads(body_text)
+            except Exception:
+                try:
+                    pre = await page.query_selector("pre")
+                    pre_text = _clean_text(await pre.inner_text()) if pre else ""
+                    if pre_text:
+                        parsed_payload = json.loads(pre_text)
+                except Exception:
+                    parsed_payload = None
+
+            if not isinstance(parsed_payload, dict):
+                if debug:
+                    logger.info("[reddit-fetch-browser-json] could not parse JSON endpoint=%s", endpoint)
+                continue
+
+            candidates = _extract_story_candidates_from_json_payload(parsed_payload)
+            if not candidates:
+                if debug:
+                    logger.info("[reddit-fetch-browser-json] no story candidates endpoint=%s", endpoint)
+                continue
+
+            chosen = random.choice(candidates)
+            if debug:
+                logger.info(
+                    "[reddit-fetch-browser-json] selected story permalink=%s body_chars=%s",
+                    chosen.get("permalink"),
+                    len(chosen.get("body", "")),
+                )
+            return chosen
+        except Exception as exc:
+            if debug:
+                logger.info("[reddit-fetch-browser-json] endpoint failed endpoint=%s error=%s", endpoint, exc)
+
+    return None
+
+
 async def fetch_random_story(
     subreddit_url: str = SUBREDDIT_URL,
     timeout_ms: int = TIMEOUT_MS,
@@ -141,7 +227,12 @@ async def fetch_random_story(
 
             initial_body_text = await _get_body_text(page)
             if _looks_like_block_page(initial_body_text):
-                logger.warning("[reddit-fetch] browser page appears blocked; falling back to Reddit JSON endpoint")
+                logger.warning("[reddit-fetch] browser page appears blocked; trying browser JSON endpoints")
+                browser_json_story = await _fetch_random_story_via_browser_json(page, timeout_ms=timeout_ms, debug=debug)
+                if browser_json_story:
+                    return browser_json_story
+
+                logger.warning("[reddit-fetch] browser JSON endpoints failed; falling back to direct Reddit JSON endpoint")
                 fallback_story = _fetch_random_story_via_reddit_json(debug=debug)
                 if fallback_story:
                     return fallback_story
@@ -188,6 +279,9 @@ async def fetch_random_story(
 
             if not candidates:
                 await _log_page_snapshot(page, "subreddit-no-candidates", debug=debug)
+                browser_json_story = await _fetch_random_story_via_browser_json(page, timeout_ms=timeout_ms, debug=debug)
+                if browser_json_story:
+                    return browser_json_story
                 return None
 
             node, permalink = random.choice(candidates)
