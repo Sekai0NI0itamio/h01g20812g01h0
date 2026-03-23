@@ -317,6 +317,18 @@ class YTShortsCreator_I:
                 if query in images_by_query and images_by_query[query]:
                     image_paths[i] = images_by_query[query][0]
 
+            # Fill missing image slots with already-fetched images to avoid cascading fallback.
+            successful_paths = [p for p in image_paths if p]
+            if successful_paths and any(p is None for p in image_paths):
+                logger.warning(
+                    "Background image coverage incomplete before clip creation: %s/%s; reusing available images for missing sections",
+                    len(successful_paths),
+                    len(image_paths),
+                )
+                for i, path in enumerate(image_paths):
+                    if path is None:
+                        image_paths[i] = successful_paths[i % len(successful_paths)]
+
             # Create image clips with zoom effect in parallel
             background_clips = create_image_clips_parallel(
                 image_paths=image_paths,
@@ -358,29 +370,42 @@ class YTShortsCreator_I:
                     existing_audio_data=audio_data
                 )
             
-            # Also fallback if we have too few background clips compared to script sections
+            # If a few clips failed, reuse successful clips to preserve image-mode render continuity.
             if len(valid_background_clips) < len(script_sections):
                 logger.error(
-                    f"Background clip coverage incomplete: {len(valid_background_clips)}/{len(script_sections)}"
+                    "Background clip coverage incomplete: %s/%s",
+                    len(valid_background_clips),
+                    len(script_sections),
                 )
-                logger.warning(
-                    f"⚠️ FALLBACK: Only {len(valid_background_clips)}/{len(script_sections)} background clips were generated"
-                )
-                return self.v_creator.create_youtube_short(
-                    title=title,
-                    script_sections=script_sections,
-                    background_query=background_query,
-                    output_filename=output_filename,
-                    add_captions=add_captions,
-                    style="video",
-                    voice_style=voice_style,
-                    max_duration=max_duration,
-                    background_queries=background_queries,
-                    blur_background=blur_background,
-                    edge_blur=edge_blur,
-                    add_watermark_text=add_watermark_text,
-                    existing_audio_data=audio_data
-                )
+                if valid_background_clips:
+                    for i, clip in enumerate(background_clips):
+                        if clip is None:
+                            fallback_clip = valid_background_clips[i % len(valid_background_clips)]
+                            background_clips[i] = fallback_clip.with_duration(durations[i])
+                            logger.warning("Reused fallback background clip for section %s", i)
+                    valid_background_clips = [clip for clip in background_clips if clip]
+
+                if len(valid_background_clips) < len(script_sections):
+                    logger.warning(
+                        "⚠️ FALLBACK: Only %s/%s background clips were generated after reuse",
+                        len(valid_background_clips),
+                        len(script_sections),
+                    )
+                    return self.v_creator.create_youtube_short(
+                        title=title,
+                        script_sections=script_sections,
+                        background_query=background_query,
+                        output_filename=output_filename,
+                        add_captions=add_captions,
+                        style="video",
+                        voice_style=voice_style,
+                        max_duration=max_duration,
+                        background_queries=background_queries,
+                        blur_background=blur_background,
+                        edge_blur=edge_blur,
+                        add_watermark_text=add_watermark_text,
+                        existing_audio_data=audio_data
+                    )
 
             if not audio_data:
                 logger.error("No audio generated")

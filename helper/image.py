@@ -83,6 +83,38 @@ REALISTIC_USER_AGENTS = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
 ]
 
+QUERY_STOPWORDS = {
+    "the", "and", "with", "from", "that", "this", "into", "over", "under", "through",
+    "photorealistic", "portrait", "background", "showing", "displaying", "screen", "phone",
+}
+
+
+def _build_query_candidates(query, max_terms=8):
+    text = (query or "").strip().lower()
+    if not text:
+        return []
+
+    normalized = re.sub(r"[^a-z0-9\s]+", " ", text)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    candidates = []
+    if normalized:
+        candidates.append(normalized)
+
+    words = []
+    for token in normalized.split():
+        if len(token) < 3:
+            continue
+        if token.isdigit():
+            continue
+        if token in QUERY_STOPWORDS:
+            continue
+        if token not in words:
+            words.append(token)
+
+    candidates.extend(words[:max_terms])
+    return candidates
+
 
 def _browser_headers(referer):
     return {
@@ -280,6 +312,9 @@ def generate_images_parallel(prompts, style="photorealistic", max_workers=None):
 
     def generate_single_image(prompt):
         try:
+            # Small jitter reduces burst-rate bans from public search endpoints.
+            time.sleep(random.uniform(0.1, 0.35))
+
             logger.info(f"Trying DuckDuckGo for: {prompt[:30]}...")
             image_path = fetch_image_from_duckduckgo(prompt)
             if image_path:
@@ -304,8 +339,11 @@ def generate_images_parallel(prompts, style="photorealistic", max_workers=None):
             return None
 
     if not max_workers:
-        # Use fewer workers for API calls to avoid rate limiting
-        max_workers = min(len(prompts), 4)
+        # Use fewer workers for API calls, especially when Tor is enabled.
+        if REQUESTS_SESSION.proxies:
+            max_workers = min(len(prompts), 2)
+        else:
+            max_workers = min(len(prompts), 4)
 
     # Image generation is I/O bound (API calls), so use ThreadPoolExecutor
     image_paths = [None] * len(prompts)
@@ -378,35 +416,32 @@ def _fetch_image_from_unsplash(query, file_path=None):
         return None
 
     try:
-        # Prepare Unsplash API request
-        url = "https://api.unsplash.com/search/photos"
-        params = {
-            "query": query,
-            "per_page": 1,
-            "orientation": "portrait",  # For YouTube shorts
-            "client_id": unsplash_api_key
-        }
-
-        # Make request
         _log_proxy_usage("Unsplash")
-        response = REQUESTS_SESSION.get(url, params=params)
+        for candidate in _build_query_candidates(query):
+            params = {
+                "query": candidate,
+                "per_page": 1,
+                "orientation": "portrait",  # For YouTube shorts
+                "client_id": unsplash_api_key
+            }
+            response = REQUESTS_SESSION.get("https://api.unsplash.com/search/photos", params=params, timeout=20)
 
-        if response.status_code == 200:
+            if response.status_code != 200:
+                logger.warning("Unsplash API error: %s for query '%s'", response.status_code, candidate)
+                continue
+
             data = response.json()
-            if data["results"]:
-                image_url = data["results"][0]["urls"]["regular"]
+            if not data.get("results"):
+                logger.info("Unsplash returned no results for query '%s'", candidate)
+                continue
 
-                # Download image
-                img_response = REQUESTS_SESSION.get(image_url)
-                if img_response.status_code == 200:
-                    with open(file_path, "wb") as f:
-                        f.write(img_response.content)
-                    logger.info(f"Unsplash image downloaded to {file_path}")
-                    return file_path
-            else:
-                logger.warning(f"No results found on Unsplash for query: {query}")
-        else:
-            logger.error(f"Unsplash API error: {response.status_code} - {response.text}")
+            image_url = data["results"][0]["urls"]["regular"]
+            img_response = REQUESTS_SESSION.get(image_url, timeout=20)
+            if img_response.status_code == 200:
+                with open(file_path, "wb") as f:
+                    f.write(img_response.content)
+                logger.info("Unsplash image downloaded to %s (query='%s')", file_path, candidate)
+                return file_path
 
     except Exception as e:
         logger.error(f"Error fetching image from Unsplash: {e}")
@@ -434,35 +469,37 @@ def _fetch_image_from_pexels(query, file_path=None):
         return None
 
     try:
-        # Prepare Pexels API request
-        url = "https://api.pexels.com/v1/search"
         headers = {"Authorization": pexels_api_key}
-        params = {
-            "query": query,
-            "per_page": 1,
-            "orientation": "portrait"  # For YouTube shorts
-        }
-
-        # Make request
         _log_proxy_usage("Pexels")
-        response = REQUESTS_SESSION.get(url, headers=headers, params=params)
+        for candidate in _build_query_candidates(query):
+            params = {
+                "query": candidate,
+                "per_page": 1,
+                "orientation": "portrait"  # For YouTube shorts
+            }
+            response = REQUESTS_SESSION.get(
+                "https://api.pexels.com/v1/search",
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
 
-        if response.status_code == 200:
+            if response.status_code != 200:
+                logger.warning("Pexels API error: %s for query '%s'", response.status_code, candidate)
+                continue
+
             data = response.json()
-            if data.get("photos"):
-                image_url = data["photos"][0]["src"]["large"]
+            if not data.get("photos"):
+                logger.info("Pexels returned no results for query '%s'", candidate)
+                continue
 
-                # Download image
-                img_response = REQUESTS_SESSION.get(image_url)
-                if img_response.status_code == 200:
-                    with open(file_path, "wb") as f:
-                        f.write(img_response.content)
-                    logger.info(f"Pexels image downloaded to {file_path}")
-                    return file_path
-            else:
-                logger.warning(f"No results found on Pexels for query: {query}")
-        else:
-            logger.error(f"Pexels API error: {response.status_code} - {response.text}")
+            image_url = data["photos"][0]["src"]["large"]
+            img_response = REQUESTS_SESSION.get(image_url, timeout=20)
+            if img_response.status_code == 200:
+                with open(file_path, "wb") as f:
+                    f.write(img_response.content)
+                logger.info("Pexels image downloaded to %s (query='%s')", file_path, candidate)
+                return file_path
 
     except Exception as e:
         logger.error(f"Error fetching image from Pexels: {e}")

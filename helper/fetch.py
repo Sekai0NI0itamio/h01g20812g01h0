@@ -5,6 +5,7 @@ import concurrent.futures
 from moviepy  import VideoFileClip
 import logging
 import time
+import re
 from helper.minor_helper import measure_time
 from helper.network import create_requests_session
 
@@ -42,6 +43,38 @@ def get_pixabay_api_key():
 # Constants
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
+
+QUERY_STOPWORDS = {
+    "the", "and", "with", "from", "that", "this", "into", "over", "under", "through",
+    "phone", "screen", "background", "photorealistic", "portrait", "showing", "displaying",
+}
+
+
+def _build_query_candidates(query, max_terms=8):
+    text = (query or "").strip().lower()
+    if not text:
+        return []
+
+    normalized = re.sub(r"[^a-z0-9\s]+", " ", text)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    candidates = []
+    if normalized:
+        candidates.append(normalized)
+
+    words = []
+    for token in normalized.split():
+        if len(token) < 3:
+            continue
+        if token.isdigit():
+            continue
+        if token in QUERY_STOPWORDS:
+            continue
+        if token not in words:
+            words.append(token)
+
+    candidates.extend(words[:max_terms])
+    return candidates
 
 @measure_time
 def fetch_videos_parallel(queries, count_per_query=1, min_duration=5):
@@ -186,12 +219,28 @@ def _fetch_from_pixabay(query, count, min_duration):
             logger.warning("No Pixabay API key available.")
             return []
 
-        url = f"https://pixabay.com/api/videos/?key={pixabay_api_key}&q={query}&min_width=1080&min_height=1920&per_page=20"
         _log_proxy_usage("Pixabay")
-        response = REQUESTS_SESSION.get(url, timeout=20)
-        if response.status_code == 200:
+        search_candidates = _build_query_candidates(query)
+
+        for candidate in search_candidates:
+            params = {
+                "key": pixabay_api_key,
+                "q": candidate,
+                "min_width": 1080,
+                "min_height": 1920,
+                "per_page": 20,
+            }
+            response = REQUESTS_SESSION.get("https://pixabay.com/api/videos/", params=params, timeout=20)
+            if response.status_code != 200:
+                logger.warning("Pixabay API returned status code %s for query '%s'", response.status_code, candidate)
+                continue
+
             data = response.json()
             videos = data.get("hits", [])
+            if not videos:
+                logger.info("Pixabay returned no results for query '%s'", candidate)
+                continue
+
             video_paths = []
             # Randomly select videos from the top 10
             top_videos = videos[:10]
@@ -254,10 +303,10 @@ def _fetch_from_pixabay(query, count, min_duration):
                     if video_path:
                         video_paths.append(video_path)
 
-            return video_paths
+            if video_paths:
+                logger.info("Pixabay fallback query succeeded with '%s'", candidate)
+                return video_paths
 
-        # If response wasn't 200, return empty list
-        logger.warning(f"Pixabay API returned status code {response.status_code}")
         return []
     except Exception as e:
         logger.error(f"Error fetching videos from Pixabay: {e}")
@@ -282,13 +331,32 @@ def _fetch_from_pexels(query, count=5, min_duration=15):
             logger.warning("No Pexels API key available.")
             return []
 
-        url = f"https://api.pexels.com/videos/search?query={query}&per_page=20&orientation=portrait"
         headers = {"Authorization": pexels_api_key}
         _log_proxy_usage("Pexels")
-        response = REQUESTS_SESSION.get(url, headers=headers, timeout=20)
-        if response.status_code == 200:
+        search_candidates = _build_query_candidates(query)
+
+        for candidate in search_candidates:
+            params = {
+                "query": candidate,
+                "per_page": 20,
+                "orientation": "portrait",
+            }
+            response = REQUESTS_SESSION.get(
+                "https://api.pexels.com/videos/search",
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+            if response.status_code != 200:
+                logger.warning("Pexels API returned status code %s for query '%s'", response.status_code, candidate)
+                continue
+
             data = response.json()
             videos = data.get("videos", [])
+            if not videos:
+                logger.info("Pexels returned no results for query '%s'", candidate)
+                continue
+
             video_paths = []
             # Randomly select videos from the top 10
             top_videos = videos[:10]
@@ -365,10 +433,10 @@ def _fetch_from_pexels(query, count=5, min_duration=15):
                     if video_path:
                         video_paths.append(video_path)
 
-            return video_paths
+            if video_paths:
+                logger.info("Pexels fallback query succeeded with '%s'", candidate)
+                return video_paths
 
-        # If response wasn't 200, return empty list
-        logger.warning(f"Pexels API returned status code {response.status_code}")
         return []
     except Exception as e:
         logger.error(f"Error fetching videos from Pexels: {e}")
