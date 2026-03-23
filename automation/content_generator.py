@@ -274,7 +274,40 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries):
             if missing_fields:
                 raise ValueError(f"Missing required fields in response: {missing_fields}")
 
-            content_package["script"] = filter_instructional_labels(content_package["script"])
+            # Post-process the generated package: simplify the script in the same conversation
+            # by asking the model to remove descriptive words and rewrite the `script` as
+            # plain, grade-1-level, colloquial text (allowing grammatical failures).
+            try:
+                assistant_raw = response_content if isinstance(response_content, str) else json.dumps(response_content)
+
+                followup_instructions = (
+                    "Now refine the previously generated content. Take the 'script' field produced above and:"
+                    "\n- Remove descriptive/adjective/adverb words so lines are plain and concrete."
+                    "\n- Rewrite the script in extremely simple English (grade 1 reading level)."
+                    "\n- Allow colloquial modern childlike phrasing and minor grammatical errors to match how children speak."
+                    "\n- Keep the same number of lines (20-30) and keep them short (4-12 words each)."
+                    "\n- Output ONLY the rewritten script as plain newline-separated lines. Do NOT include markdown, labels, or extra keys."
+                )
+
+                # Build messages representing the same conversation: user prompt -> assistant response -> user follow-up
+                messages = [
+                    {"role": "user", "content": package_prompt},
+                    {"role": "assistant", "content": assistant_raw},
+                    {"role": "user", "content": followup_instructions},
+                ]
+
+                simplified_script = _create_text_completion(
+                    messages=messages,
+                    model=model,
+                    max_tokens=500,
+                    temperature=0.9,
+                )
+
+                if isinstance(simplified_script, str) and simplified_script.strip():
+                    content_package["script"] = filter_instructional_labels(simplified_script)
+            except Exception:
+                # If anything goes wrong with the follow-up refinement, keep original script
+                content_package["script"] = filter_instructional_labels(content_package["script"])
             if source_link:
                 content_package["source_story_permalink"] = source_link
             if source_title:

@@ -27,33 +27,55 @@ import urllib.error
 
 
 def get_cookie_from_chrome(domain_substring="freevoicereader.com"):
-    """Use AppleScript (osascript) to find a Chrome tab with the domain and return document.cookie.
-    Returns the raw cookie string (e.g. "k1=v1; k2=v2") or None.
-    """
-    applescript = r'''
+        """Try to read cookies directly from Chrome storage using `browser_cookie3`.
+        Falls back to the AppleScript approach if `browser_cookie3` isn't available.
+        Returns the raw cookie string (e.g. "k1=v1; k2=v2") or None.
+        """
+        try:
+                import browser_cookie3
+        except Exception:
+                browser_cookie3 = None
+
+        if browser_cookie3:
+                try:
+                        jar = browser_cookie3.chrome(domain_name=domain_substring)
+                        pairs = []
+                        for c in jar:
+                                # cookiejar cookie objects have .name and .value
+                                try:
+                                        pairs.append(f"{c.name}={c.value}")
+                                except Exception:
+                                        continue
+                        if pairs:
+                                return "; ".join(pairs)
+                except Exception:
+                        pass
+
+        # Fallback: attempt to read document.cookie from an open Chrome tab (requires Automation permission)
+        applescript = r'''
 tell application "Google Chrome"
-  repeat with w in windows
-    repeat with t in tabs of w
-      set u to URL of t
-      if u contains "%s" then
-        try
-          return execute t javascript "document.cookie"
-        end try
-      end if
+    repeat with w in windows
+        repeat with t in tabs of w
+            set u to URL of t
+            if u contains "%s" then
+                try
+                    return execute t javascript "document.cookie"
+                end try
+            end if
+        end repeat
     end repeat
-  end repeat
 end tell
 return ""
 ''' % domain_substring
 
-    try:
-        proc = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True, check=False)
-        out = proc.stdout.strip()
-        if out:
-            return out
-    except Exception:
+        try:
+                proc = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True, check=False)
+                out = proc.stdout.strip()
+                if out:
+                        return out
+        except Exception:
+                return None
         return None
-    return None
 
 
 def detect_repo_from_git():
