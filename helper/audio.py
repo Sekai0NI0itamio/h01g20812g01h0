@@ -34,6 +34,10 @@ class AudioHelper:
 
         self.freevoicereader_tts = None
         self.max_tts_gap_seconds = float(os.getenv("TTS_MAX_GAP_SECONDS", "0.7"))
+        self.tts_max_retries = max(1, int(os.getenv("TTS_GENERATION_RETRIES", "3")))
+        self.tts_retry_backoff_seconds = max(0.2, float(os.getenv("TTS_RETRY_BACKOFF_SECONDS", "1.0")))
+        self.tts_regen_passes = max(1, int(os.getenv("TTS_REGENERATION_PASSES", "2")))
+        self.tts_max_workers = max(1, int(os.getenv("SHORTS_TTS_MAX_WORKERS", "4")))
         use_freevoicereader = os.getenv("USE_FREEVOICEREADER_TTS", "true").lower()
         logger.info("USE_FREEVOICEREADER_TTS=%s", use_freevoicereader)
 
@@ -76,20 +80,36 @@ class AudioHelper:
             text = text.strip() + "."  # Add period if missing
 
         if self.freevoicereader_tts:
-            try:
-                out = self.freevoicereader_tts.generate_speech(
-                    text,
-                    output_filename=filename,
-                    voice_style=voice_style,
-                )
+            last_error = None
+            for attempt in range(1, self.tts_max_retries + 1):
                 try:
-                    sped = self._speedup_audio(out, speed=1.1)
-                    normalized = self._normalize_tts_pacing(sped)
-                    return self._ensure_min_duration(normalized, min_duration)
-                except Exception:
-                    return out
-            except Exception as e:
-                logger.error(f"FreeVoiceReader TTS failed: {e}")
+                    out = self.freevoicereader_tts.generate_speech(
+                        text,
+                        output_filename=filename,
+                        voice_style=voice_style,
+                    )
+                    if not self._is_valid_audio_file(out):
+                        raise RuntimeError(f"Generated audio file is missing or empty: {out}")
+
+                    try:
+                        sped = self._speedup_audio(out, speed=1.1)
+                        normalized = self._normalize_tts_pacing(sped)
+                        final_path = self._ensure_min_duration(normalized, min_duration)
+                        if self._is_valid_audio_file(final_path):
+                            return final_path
+                        raise RuntimeError(f"Post-processed audio file is missing or empty: {final_path}")
+                    except Exception:
+                        if self._is_valid_audio_file(out):
+                            return out
+                        raise
+                except Exception as e:
+                    last_error = e
+                    logger.error("FreeVoiceReader TTS failed (attempt %s/%s): %s", attempt, self.tts_max_retries, e)
+                    if attempt < self.tts_max_retries:
+                        time.sleep(self.tts_retry_backoff_seconds * attempt)
+
+            if last_error:
+                logger.error("FreeVoiceReader TTS exhausted retries: %s", last_error)
             return None
 
         logger.error("FreeVoiceReader TTS is disabled or unavailable (USE_FREEVOICEREADER_TTS=%s, initialized=%s)", os.getenv("USE_FREEVOICEREADER_TTS", "true"), bool(self.freevoicereader_tts))
@@ -125,39 +145,70 @@ class AudioHelper:
         start_time = time.time()
         logger.info(f"Generating {len(script_sections)} audio clips in parallel")
 
-        def process_section(section):
+        def process_section(index, section):
             section_voice = section.get('voice_style', voice_style)
             text = section.get('text', '')
-            section_id = section.get('id', int(time.time()))
+            section_id = section.get('id') or f"section_{index}_{int(time.time())}"
             filename = os.path.join(self.temp_dir, f"audio_{section_id}.wav")
             target_duration = float(section.get('duration', 0.0) or 0.0)
 
             return self.create_tts_audio(text, filename, section_voice, min_duration=target_duration)
 
-        workers = max_workers or min(len(script_sections), os.cpu_count() * 2)
-        audio_files = []
+        workers = max_workers or min(len(script_sections), self.tts_max_workers)
+        audio_files = [None] * len(script_sections)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(process_section, section): i
+            futures = {executor.submit(process_section, i, section): i
                       for i, section in enumerate(script_sections)}
 
             for future in concurrent.futures.as_completed(futures):
                 idx = futures[future]
                 try:
                     audio_path = future.result()
-                    if audio_path:
-                        # Store the result in the correct order
-                        while len(audio_files) <= idx:
-                            audio_files.append(None)
+                    if self._is_valid_audio_file(audio_path):
                         audio_files[idx] = audio_path
+                    else:
+                        logger.warning("Audio clip missing or invalid for section %s", idx)
                 except Exception as e:
                     logger.error(f"Error generating audio for section {idx}: {e}")
 
-        total_time = time.time() - start_time
-        logger.info(f"Generated {len(audio_files)} audio clips in {total_time:.2f} seconds")
+        # Recovery pass for missing clips (sequential-ish to reduce upstream timeout/rate pressure)
+        for regen_pass in range(1, self.tts_regen_passes + 1):
+            missing_indices = [i for i, path in enumerate(audio_files) if not self._is_valid_audio_file(path)]
+            if not missing_indices:
+                break
 
-        # Filter out None values
-        audio_files = [f for f in audio_files if f]
+            logger.warning(
+                "Regenerating %s missing audio clips (pass %s/%s)",
+                len(missing_indices),
+                regen_pass,
+                self.tts_regen_passes,
+            )
+
+            for idx in missing_indices:
+                section = script_sections[idx]
+                section_voice = section.get('voice_style', voice_style)
+                text = section.get('text', '')
+                section_id = section.get('id') or f"section_{idx}_{int(time.time())}"
+                retry_filename = os.path.join(self.temp_dir, f"audio_{section_id}_regen{regen_pass}.wav")
+                target_duration = float(section.get('duration', 0.0) or 0.0)
+                regenerated = self.create_tts_audio(
+                    text,
+                    retry_filename,
+                    section_voice,
+                    min_duration=target_duration,
+                )
+                if self._is_valid_audio_file(regenerated):
+                    audio_files[idx] = regenerated
+
+        total_time = time.time() - start_time
+        valid_count = sum(1 for p in audio_files if self._is_valid_audio_file(p))
+        logger.info(
+            "Generated %s/%s valid audio clips in %.2f seconds",
+            valid_count,
+            len(script_sections),
+            total_time,
+        )
 
         return audio_files
 
@@ -216,7 +267,7 @@ class AudioHelper:
         # Get durations for each audio file
         audio_data = []
         for i, audio_file in enumerate(audio_files):
-            if audio_file:
+            if self._is_valid_audio_file(audio_file):
                 try:
                     clip = AudioFileClip(audio_file)
                     duration = clip.duration
@@ -229,8 +280,69 @@ class AudioHelper:
                     })
                 except Exception as e:
                     logger.error(f"Error getting audio duration for {audio_file}: {e}")
+                    audio_data.append(None)
+            else:
+                audio_data.append(None)
 
         return audio_data
+
+    def ensure_audio_data_complete(self, script_sections, audio_data, voice_style=None):
+        """
+        Validate audio_data alignment and regenerate missing/invalid section audio files.
+        Returns a list aligned to script_sections where each entry is either audio metadata dict or None.
+        """
+        normalized = list(audio_data or [])
+        if len(normalized) < len(script_sections):
+            normalized.extend([None] * (len(script_sections) - len(normalized)))
+        elif len(normalized) > len(script_sections):
+            normalized = normalized[:len(script_sections)]
+
+        for idx, section in enumerate(script_sections):
+            item = normalized[idx]
+            path = item.get("path") if isinstance(item, dict) else None
+            if self._is_valid_audio_file(path):
+                continue
+
+            section_voice = section.get('voice_style', voice_style)
+            text = section.get('text', '')
+            section_id = section.get('id') or f"section_{idx}_{int(time.time())}"
+            regen_filename = os.path.join(self.temp_dir, f"audio_{section_id}_ensure.wav")
+            target_duration = float(section.get('duration', 0.0) or 0.0)
+            regenerated = self.create_tts_audio(
+                text,
+                regen_filename,
+                section_voice,
+                min_duration=target_duration,
+            )
+
+            if self._is_valid_audio_file(regenerated):
+                duration = target_duration
+                try:
+                    clip = AudioFileClip(regenerated)
+                    duration = float(clip.duration or target_duration)
+                    clip.close()
+                except Exception:
+                    pass
+
+                normalized[idx] = {
+                    'path': regenerated,
+                    'duration': duration,
+                    'section_idx': idx,
+                }
+                logger.info("Recovered missing audio for section %s", idx)
+            else:
+                normalized[idx] = None
+                logger.warning("Could not recover audio for section %s", idx)
+
+        return normalized
+
+    def _is_valid_audio_file(self, path):
+        if not path:
+            return False
+        try:
+            return os.path.exists(path) and os.path.getsize(path) > 128
+        except Exception:
+            return False
 
     def _speedup_audio(self, input_path, speed=1.3):
         """

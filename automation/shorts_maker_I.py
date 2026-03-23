@@ -221,6 +221,13 @@ class YTShortsCreator_I:
             images_by_query = results.get("generate_images")
             audio_data = results.get("generate_audio")
 
+            # Regenerate any missing audio files before downstream duration/render steps.
+            audio_data = self.audio_helper.ensure_audio_data_complete(
+                script_sections=script_sections,
+                audio_data=audio_data,
+                voice_style=voice_style,
+            )
+
             # Check if we have enough images or need to fallback to video mode
             should_fallback = False
             

@@ -167,6 +167,13 @@ class YTShortsCreator_V:
             videos_by_query = results.get("fetch_videos", {})
             audio_data = results.get("generate_audio", [])
 
+            # Regenerate any missing audio files before downstream duration/render steps.
+            audio_data = self.audio_helper.ensure_audio_data_complete(
+                script_sections=script_sections,
+                audio_data=audio_data,
+                voice_style=voice_style,
+            )
+
             if not audio_data:
                 logger.warning("No audio clips were generated; using silent placeholders for each section.")
                 audio_data = [None] * len(script_sections)
