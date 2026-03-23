@@ -38,6 +38,7 @@ class AudioHelper:
         self.tts_retry_backoff_seconds = max(0.2, float(os.getenv("TTS_RETRY_BACKOFF_SECONDS", "1.0")))
         self.tts_regen_passes = max(1, int(os.getenv("TTS_REGENERATION_PASSES", "2")))
         self.tts_max_workers = max(1, int(os.getenv("SHORTS_TTS_MAX_WORKERS", "4")))
+        self.tts_speed_factor = max(0.8, min(2.0, float(os.getenv("TTS_SPEED_FACTOR", "1.2"))))
         use_freevoicereader = os.getenv("USE_FREEVOICEREADER_TTS", "true").lower()
         logger.info("USE_FREEVOICEREADER_TTS=%s", use_freevoicereader)
 
@@ -92,7 +93,7 @@ class AudioHelper:
                         raise RuntimeError(f"Generated audio file is missing or empty: {out}")
 
                     try:
-                        sped = self._speedup_audio(out, speed=1.1)
+                        sped = self._speedup_audio(out, speed=self.tts_speed_factor)
                         normalized = self._normalize_tts_pacing(sped)
                         final_path = self._ensure_min_duration(normalized, min_duration)
                         if self._is_valid_audio_file(final_path):

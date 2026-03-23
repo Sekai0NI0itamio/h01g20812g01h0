@@ -4,6 +4,7 @@ import random
 import subprocess
 import json
 import re
+import tempfile
 
 from moviepy import (
     AudioFileClip,
@@ -369,6 +370,108 @@ def _build_caption_timeline(script_sections):
     return timeline
 
 
+def _chunk_words_with_timestamps(words, fast_mode=False, max_chunks=18):
+    """Build caption chunks from timestamped words while preserving exact audio timing."""
+    if not words:
+        return []
+
+    chunk_target = 5 if fast_mode else 3
+    timeline = []
+    i = 0
+    while i < len(words) and len(timeline) < max_chunks:
+        group = words[i:i + chunk_target]
+        i += chunk_target
+        if not group:
+            continue
+
+        start = float(group[0].get("start", 0.0) or 0.0)
+        end = float(group[-1].get("end", start + 0.15) or (start + 0.15))
+        text = " ".join([str(w.get("word", "")).strip() for w in group]).strip()
+        if not text:
+            continue
+
+        timeline.append(
+            {
+                "start": start,
+                "duration": max(0.12, end - start),
+                "text": text,
+                "words": [str(w.get("word", "")).strip().lower() for w in group if str(w.get("word", "")).strip()],
+            }
+        )
+
+    return timeline
+
+
+def _build_caption_timeline_from_audio(video_path):
+    """
+    Build caption timeline from real ASR timestamps using faster-whisper (free/open source).
+    Falls back to empty list if dependency/model fails.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return []
+
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        logger.info("faster-whisper unavailable for audio-timed captions: %s", exc)
+        return []
+
+    fast_mode = os.getenv("AUTO_CAPTIONS_FAST_MODE", "true").lower() == "true"
+    max_chunks = max(1, int(os.getenv("AUTO_CAPTIONS_MAX_CHUNKS", "18")))
+    model_size = os.getenv("AUTO_CAPTIONS_WHISPER_MODEL", "tiny")
+    device = os.getenv("AUTO_CAPTIONS_WHISPER_DEVICE", "cpu")
+    compute_type = os.getenv("AUTO_CAPTIONS_WHISPER_COMPUTE_TYPE", "int8")
+
+    fd, wav_path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+
+    try:
+        # Extract mono 16k wav for faster transcription.
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", video_path,
+            "-vn",
+            "-ac", "1",
+            "-ar", "16000",
+            wav_path,
+        ]
+        subprocess.run(cmd, check=True)
+
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        segments, _ = model.transcribe(
+            wav_path,
+            word_timestamps=True,
+            vad_filter=True,
+            beam_size=1,
+        )
+
+        words = []
+        for seg in segments:
+            for w in (getattr(seg, "words", None) or []):
+                if w and getattr(w, "word", "").strip():
+                    words.append(
+                        {
+                            "start": float(getattr(w, "start", 0.0) or 0.0),
+                            "end": float(getattr(w, "end", 0.0) or 0.0),
+                            "word": str(getattr(w, "word", "")).strip(),
+                        }
+                    )
+
+        timeline = _chunk_words_with_timestamps(words, fast_mode=fast_mode, max_chunks=max_chunks)
+        if timeline:
+            logger.info("Built caption timeline from audio timestamps (%s chunks)", len(timeline))
+        return timeline
+    except Exception as exc:
+        logger.warning("Audio-timed caption generation failed: %s", exc)
+        return []
+    finally:
+        try:
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
+        except Exception:
+            pass
+
+
 def _get_gpt_caption_colors(script_sections):
     """Ask GPT for optional highlight colors for selected words."""
     try:
@@ -438,7 +541,11 @@ def add_dynamic_auto_captions_to_video(
         logger.error("Dynamic caption dependencies unavailable: %s", exc)
         return video_path
 
-    timeline = _build_caption_timeline(script_sections)
+    # Prefer real audio-based timestamps when possible; fallback to section-duration estimation.
+    use_audio_timestamps = os.getenv("AUTO_CAPTIONS_USE_AUDIO_TIMESTAMPS", "true").lower() == "true"
+    timeline = _build_caption_timeline_from_audio(video_path) if use_audio_timestamps else []
+    if not timeline:
+        timeline = _build_caption_timeline(script_sections)
     if not timeline:
         logger.warning("No caption timeline generated; skipping auto captions")
         return video_path
