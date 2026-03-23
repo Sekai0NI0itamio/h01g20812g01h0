@@ -594,7 +594,7 @@ class YTShortsCreator_I:
             logger.info(f"Successfully rendered video to {output_path}")
 
             # Add background music as a post-process
-            if os.path.exists(output_path):
+            if output_path and os.path.exists(output_path):
                 output_path = add_background_music_to_video(
                     output_path,
                     fps=self.fps,
@@ -602,14 +602,14 @@ class YTShortsCreator_I:
                 )
 
             # Add a random green-screen anime girl overlay as a final post-process.
-            if os.path.exists(output_path):
+            if output_path and os.path.exists(output_path):
                 output_path = add_anime_greenscreen_overlay_to_video(
                     output_path,
                     preset="ultrafast",
                 )
 
             # Add dynamic auto-captions after final composition and overlays.
-            if os.path.exists(output_path) and os.getenv("AUTO_CAPTIONS_ENABLED", "true").lower() == "true":
+            if output_path and os.path.exists(output_path) and os.getenv("AUTO_CAPTIONS_ENABLED", "true").lower() == "true":
                 output_path = add_dynamic_auto_captions_to_video(
                     output_path,
                     script_sections=script_sections,
@@ -619,7 +619,7 @@ class YTShortsCreator_I:
                 )
 
             # Add watermark as a post-process if requested
-            if add_watermark_text and os.path.exists(output_path):
+            if add_watermark_text and output_path and os.path.exists(output_path):
                 logger.info("Adding watermark to final video")
                 try:
                     # Load the rendered video

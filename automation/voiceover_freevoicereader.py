@@ -42,10 +42,14 @@ class FreeVoiceReaderVoiceover:
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.timeout = _env_int_or_default("FREEVOICEREADER_TTS_TIMEOUT", 90)
-        self.voice = _env_or_default("FREEVOICEREADER_TTS_VOICE", "en-TZ-ElimuNeural")
+        self.voice = _env_or_default("FREEVOICEREADER_TTS_VOICE", "en-IE-ConnorNeural")
         self.api_url = _env_or_default(
             "FREEVOICEREADER_TTS_API_URL",
             "https://www.freevoicereader.com/api/free-tts",
+        )
+        self.user_agent = _env_or_default(
+            "FREEVOICEREADER_TTS_USER_AGENT",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
         )
         self.cookie_header = os.getenv("FREEVOICEREADER_TTS_COOKIE", "").strip()
         self.cookie_token = os.getenv("FREEVOICEREADER_TTS_COOKIE_TOKEN", "").strip()
@@ -61,9 +65,17 @@ class FreeVoiceReaderVoiceover:
     def _headers(self):
         headers = {
             "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
             "Origin": "https://www.freevoicereader.com",
+            "Priority": "u=1, i",
             "Referer": "https://www.freevoicereader.com/",
-            "User-Agent": "Mozilla/5.0",
+            "Sec-CH-UA": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"macOS"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "User-Agent": self.user_agent,
         }
         if self.cookie_header:
             headers["Cookie"] = self.cookie_header

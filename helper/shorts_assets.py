@@ -235,6 +235,61 @@ def add_anime_greenscreen_overlay_to_video(
     if not video_path or not os.path.exists(video_path):
         return video_path
 
+    overlay_video_path = pick_random_greenscreen_video(greenscreen_dir)
+    if not overlay_video_path:
+        return video_path
+
+    chroma_similarity = (
+        float(os.getenv("SHORTS_GREENSCREEN_CHROMA_SIMILARITY", "0.24"))
+        if chroma_similarity is None
+        else float(chroma_similarity)
+    )
+    chroma_blend = (
+        float(os.getenv("SHORTS_GREENSCREEN_CHROMA_BLEND", "0.10"))
+        if chroma_blend is None
+        else float(chroma_blend)
+    )
+
+    temp_output = video_path.replace('.mp4', '_with_anime_overlay.mp4')
+
+    filter_complex = (
+        f"[1:v][0:v]scale2ref=w=main_w*{float(scale_factor):.4f}:h=main_h*{float(scale_factor):.4f}[anime_s][base];"
+        f"[anime_s]chromakey=0x00FF00:{chroma_similarity:.4f}:{chroma_blend:.4f}[anime];"
+        f"[base][anime]overlay=0:main_h-overlay_h:shortest=1[outv]"
+    )
+
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+        '-i', video_path,
+        '-stream_loop', '-1', '-i', overlay_video_path,
+        '-filter_complex', filter_complex,
+        '-map', '[outv]',
+        '-map', '0:a?',
+        '-c:v', 'libx264',
+        '-preset', preset,
+        '-crf', '20',
+        '-c:a', 'aac',
+        '-shortest',
+        temp_output,
+    ]
+
+    try:
+        subprocess.run(cmd, check=True)
+        os.replace(temp_output, video_path)
+        logger.info(
+            "Added green-screen anime overlay using %s",
+            os.path.basename(overlay_video_path),
+        )
+        return video_path
+    except Exception as exc:
+        logger.error("Failed to add green-screen anime overlay: %s", exc)
+        try:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+        except Exception:
+            pass
+        return video_path
+
 
 def _chunk_caption_words(words):
     """Build 2-3 word chunks for readable fast captions."""
@@ -464,61 +519,6 @@ def add_dynamic_auto_captions_to_video(
                 base_clip.close()
         except Exception:
             pass
-
-    overlay_video_path = pick_random_greenscreen_video(greenscreen_dir)
-    if not overlay_video_path:
-        return video_path
-
-    chroma_similarity = (
-        float(os.getenv("SHORTS_GREENSCREEN_CHROMA_SIMILARITY", "0.24"))
-        if chroma_similarity is None
-        else float(chroma_similarity)
-    )
-    chroma_blend = (
-        float(os.getenv("SHORTS_GREENSCREEN_CHROMA_BLEND", "0.10"))
-        if chroma_blend is None
-        else float(chroma_blend)
-    )
-
-    temp_output = video_path.replace('.mp4', '_with_anime_overlay.mp4')
-
-    filter_complex = (
-        f"[1:v][0:v]scale2ref=w=main_w*{float(scale_factor):.4f}:h=main_h*{float(scale_factor):.4f}[anime_s][base];"
-        f"[anime_s]chromakey=0x00FF00:{chroma_similarity:.4f}:{chroma_blend:.4f}[anime];"
-        f"[base][anime]overlay=0:main_h-overlay_h:shortest=1[outv]"
-    )
-
-    cmd = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
-        '-i', video_path,
-        '-stream_loop', '-1', '-i', overlay_video_path,
-        '-filter_complex', filter_complex,
-        '-map', '[outv]',
-        '-map', '0:a?',
-        '-c:v', 'libx264',
-        '-preset', preset,
-        '-crf', '20',
-        '-c:a', 'aac',
-        '-shortest',
-        temp_output,
-    ]
-
-    try:
-        subprocess.run(cmd, check=True)
-        os.replace(temp_output, video_path)
-        logger.info(
-            "Added green-screen anime overlay using %s",
-            os.path.basename(overlay_video_path),
-        )
-        return video_path
-    except Exception as exc:
-        logger.error("Failed to add green-screen anime overlay: %s", exc)
-        try:
-            if os.path.exists(temp_output):
-                os.remove(temp_output)
-        except Exception:
-            pass
-        return video_path
 
 
 def build_brainrot_overlay_clip(
