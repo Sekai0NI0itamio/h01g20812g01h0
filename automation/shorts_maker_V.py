@@ -22,6 +22,7 @@ from functools import wraps
 import traceback  # Import traceback at the module level
 from helper.minor_helper import measure_time, cleanup_temp_directories
 from helper.fetch import fetch_videos_parallel
+from helper.image import create_image_clips_parallel, fetch_image_from_duckduckgo
 from helper.blur import custom_blur, custom_edge_blur
 from helper.text import TextHelper
 from helper.process import process_background_clips_parallel
@@ -138,7 +139,7 @@ class YTShortsCreator_V:
                 logger.info("Fetching background videos in parallel")
                 return fetch_videos_parallel(
                     queries=background_queries,
-                    count_per_query=1,
+                    count_per_query=4,
                     min_duration=int(max(section.get('duration', 5) for section in script_sections)) + 2
                 )
 
@@ -223,28 +224,91 @@ class YTShortsCreator_V:
             
             # 5. Process background videos
             logger.info("Processing background videos")
-            video_paths = []
 
-            # Make background clips from videos
+            # Prefer unique stock videos across sections; if uniqueness is impossible, fallback to image search.
+            used_video_paths = set()
+            video_info = []
+            video_section_indices = []
+            image_fallback_indices = []
+            image_fallback_queries = []
+
             for i, section in enumerate(script_sections):
                 query = background_queries[i]
                 target_duration = section.get('duration', 5)
+                candidates = videos_by_query.get(query, [])
 
-                # Find the video for this section
-                if query in videos_by_query and videos_by_query[query]:
-                    video_paths.append({
-                        'path': videos_by_query[query][0],
+                chosen_video = None
+                for candidate in candidates:
+                    if candidate and candidate not in used_video_paths:
+                        chosen_video = candidate
+                        break
+
+                if chosen_video:
+                    used_video_paths.add(chosen_video)
+                    video_info.append({
+                        'path': chosen_video,
                         'target_duration': target_duration,
                         'section_idx': i,
                         'query': query
                     })
+                    video_section_indices.append(i)
+                else:
+                    image_fallback_indices.append(i)
+                    image_fallback_queries.append(query)
 
-            # Process videos in parallel
-            background_clips = process_background_clips_parallel(
-                video_info=video_paths,
+            processed_video_clips = process_background_clips_parallel(
+                video_info=video_info,
                 blur_background=blur_background,
                 edge_blur=edge_blur,
-            )
+            ) if video_info else []
+
+            background_clips = [None] * len(script_sections)
+            for idx, clip in zip(video_section_indices, processed_video_clips):
+                background_clips[idx] = clip
+
+            if image_fallback_indices:
+                logger.warning(
+                    "Using DDG->Brave->Ecosia image fallback for %s sections where unique videos were unavailable",
+                    len(image_fallback_indices),
+                )
+                used_image_paths = set()
+                image_paths = []
+                image_durations = []
+
+                for fallback_idx, query in zip(image_fallback_indices, image_fallback_queries):
+                    target_duration = script_sections[fallback_idx].get('duration', 5)
+                    image_path = None
+
+                    # Try query variants to avoid duplicate image assets.
+                    query_variants = [query]
+                    for token in str(query).split():
+                        cleaned = token.strip(",.:'\"()[]{}")
+                        if len(cleaned) >= 3 and cleaned not in query_variants:
+                            query_variants.append(cleaned)
+
+                    for variant in query_variants[:8]:
+                        candidate_path = fetch_image_from_duckduckgo(variant)
+                        if candidate_path and candidate_path not in used_image_paths:
+                            image_path = candidate_path
+                            used_image_paths.add(candidate_path)
+                            break
+
+                    image_paths.append(image_path)
+                    image_durations.append(target_duration)
+
+                image_clips = create_image_clips_parallel(
+                    image_paths=image_paths,
+                    durations=image_durations,
+                    with_zoom=True,
+                )
+
+                for idx, clip in zip(image_fallback_indices, image_clips):
+                    if clip:
+                        if blur_background:
+                            clip = custom_blur(clip, intensity=2)
+                        elif edge_blur:
+                            clip = custom_edge_blur(clip, edge_size=80)
+                        background_clips[idx] = clip
 
             # Make sure we have all the components
             missing_background = [i for i, clip in enumerate(background_clips) if clip is None]
