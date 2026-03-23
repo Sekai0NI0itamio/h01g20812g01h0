@@ -28,6 +28,7 @@ from helper.text import TextHelper
 from helper.process import process_background_clips_parallel
 from helper.audio import AudioHelper
 from helper.shorts_assets import (
+    add_dynamic_auto_captions_to_video,
     add_anime_greenscreen_overlay_to_video,
     add_background_music_to_video,
     build_brainrot_overlay_clip,
@@ -503,6 +504,16 @@ class YTShortsCreator_V:
             if os.path.exists(output_path):
                 output_path = add_anime_greenscreen_overlay_to_video(
                     output_path,
+                    preset="ultrafast",
+                )
+
+            # Add dynamic auto-captions after final composition and overlays.
+            if os.path.exists(output_path) and os.getenv("AUTO_CAPTIONS_ENABLED", "true").lower() == "true":
+                output_path = add_dynamic_auto_captions_to_video(
+                    output_path,
+                    script_sections=script_sections,
+                    font_size=16,
+                    position_ratio=0.5,
                     preset="ultrafast",
                 )
 

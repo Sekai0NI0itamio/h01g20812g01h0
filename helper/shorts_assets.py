@@ -2,6 +2,8 @@ import logging
 import os
 import random
 import subprocess
+import json
+import re
 
 from moviepy import (
     AudioFileClip,
@@ -26,6 +28,7 @@ DEFAULT_GREENSCREEN_DIR = os.getenv(
 
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv")
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 def get_default_font_path():
@@ -231,6 +234,236 @@ def add_anime_greenscreen_overlay_to_video(
     """
     if not video_path or not os.path.exists(video_path):
         return video_path
+
+
+def _chunk_caption_words(words):
+    """Build 2-3 word chunks for readable fast captions."""
+    chunks = []
+    i = 0
+    use_three = True
+    while i < len(words):
+        remaining = len(words) - i
+        if remaining <= 3:
+            take = remaining
+        else:
+            take = 3 if use_three else 2
+        if take == 1 and chunks:
+            chunks[-1].append(words[i])
+            break
+        chunks.append(words[i:i + take])
+        i += take
+        use_three = not use_three
+    return chunks
+
+
+def _build_caption_timeline(script_sections):
+    timeline = []
+    cursor = 0.0
+    for section in script_sections or []:
+        text = str(section.get("text", "") or "").strip()
+        duration = float(section.get("duration", 0.0) or 0.0)
+        if not text or duration <= 0.05:
+            cursor += max(0.0, duration)
+            continue
+
+        words = [w for w in re.findall(r"[A-Za-z0-9']+", text) if w]
+        if len(words) < 2:
+            cursor += duration
+            continue
+
+        chunks = _chunk_caption_words(words)
+        weights = [sum(max(1, len(w)) for w in chunk) for chunk in chunks]
+        total_weight = max(1, sum(weights))
+        section_cursor = cursor
+        for chunk, weight in zip(chunks, weights):
+            chunk_duration = max(0.12, duration * (weight / total_weight))
+            timeline.append(
+                {
+                    "start": section_cursor,
+                    "duration": chunk_duration,
+                    "text": " ".join(chunk),
+                    "words": [w.lower() for w in chunk],
+                }
+            )
+            section_cursor += chunk_duration
+        cursor += duration
+    return timeline
+
+
+def _get_gpt_caption_colors(script_sections):
+    """Ask GPT for optional highlight colors for selected words."""
+    try:
+        from automation.scitely_client import create_chat_completion
+        from automation.content_generator import _parse_json_response, _extract_completion_content
+    except Exception as exc:
+        logger.info("Caption color planner unavailable: %s", exc)
+        return {}
+
+    joined = " ".join(str(s.get("text", "") or "") for s in script_sections or [])
+    words = [w.lower() for w in re.findall(r"[A-Za-z]{4,}", joined)]
+    dedup = []
+    for w in words:
+        if w not in dedup:
+            dedup.append(w)
+    candidates = dedup[:60]
+    if not candidates:
+        return {}
+
+    prompt = (
+        "Pick up to 18 emotionally important words from the provided word list and assign each "
+        "a hex color (#RRGGBB) for video caption highlight effects. Return JSON only in shape "
+        "{\"colors\": {\"word\": \"#RRGGBB\"}}.\n"
+        f"Words: {', '.join(candidates)}"
+    )
+
+    try:
+        response = create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=260,
+            temperature=0.7,
+        )
+        content = _extract_completion_content(response)
+        parsed = _parse_json_response(content)
+        raw = parsed.get("colors", {}) if isinstance(parsed, dict) else {}
+        result = {}
+        for word, hex_color in raw.items():
+            key = str(word or "").strip().lower()
+            val = str(hex_color or "").strip()
+            if key and HEX_COLOR_RE.match(val):
+                result[key] = val
+        return result
+    except Exception as exc:
+        logger.warning("GPT caption color planning failed: %s", exc)
+        return {}
+
+
+def add_dynamic_auto_captions_to_video(
+    video_path,
+    script_sections,
+    font_size=16,
+    position_ratio=0.5,
+    preset="ultrafast",
+):
+    """
+    Add dynamic middle-screen captions after final composition.
+    Captions are timed from spoken section durations and displayed in 2-3 word chunks.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return video_path
+    if not script_sections:
+        return video_path
+
+    try:
+        from moviepy import CompositeVideoClip, TextClip, VideoFileClip
+    except Exception as exc:
+        logger.error("Dynamic caption dependencies unavailable: %s", exc)
+        return video_path
+
+    timeline = _build_caption_timeline(script_sections)
+    if not timeline:
+        logger.warning("No caption timeline generated; skipping auto captions")
+        return video_path
+
+    color_map = _get_gpt_caption_colors(script_sections)
+    palette = ["#FFD54F", "#4FC3F7", "#FF8A80", "#A5D6A7", "#CE93D8", "#FFB74D"]
+
+    base_clip = None
+    composited = None
+    temp_output = video_path.replace(".mp4", "_with_captions.mp4")
+    try:
+        base_clip = VideoFileClip(video_path)
+        center_y = int(base_clip.h * float(position_ratio))
+        font_path = get_default_font_path() or ""
+
+        caption_layers = [base_clip]
+        for idx, item in enumerate(timeline):
+            text = item["text"]
+            start = float(item["start"])
+            duration = float(item["duration"])
+            words = item.get("words", [])
+
+            highlight = None
+            for w in words:
+                if w in color_map:
+                    highlight = color_map[w]
+                    break
+            if not highlight:
+                highlight = palette[idx % len(palette)]
+
+            # Outer glow layer
+            glow = TextClip(
+                text=text,
+                font=font_path,
+                font_size=font_size,
+                color=highlight,
+                stroke_color=highlight,
+                stroke_width=8,
+                method="caption",
+                size=(int(base_clip.w * 0.9), None),
+            ).with_start(start).with_duration(duration).with_position(("center", center_y)).with_opacity(0.22)
+
+            # Main bold/fat readable layer
+            core = TextClip(
+                text=text,
+                font=font_path,
+                font_size=font_size,
+                color="#FFFFFF",
+                stroke_color=highlight,
+                stroke_width=4,
+                method="caption",
+                size=(int(base_clip.w * 0.9), None),
+            ).with_start(start).with_duration(duration).with_position(("center", center_y))
+
+            # Quick shimmer pass to simulate a shine sweep
+            shine_dur = max(0.12, min(0.28, duration * 0.35))
+            shine = TextClip(
+                text=text,
+                font=font_path,
+                font_size=font_size,
+                color="#FFFFFF",
+                stroke_color="#FFFFFF",
+                stroke_width=2,
+                method="caption",
+                size=(int(base_clip.w * 0.9), None),
+            ).with_start(start + min(0.08, duration * 0.2)).with_duration(shine_dur).with_position(("center", center_y - 1)).with_opacity(0.55)
+
+            caption_layers.extend([glow, core, shine])
+
+        composited = CompositeVideoClip(caption_layers, size=(base_clip.w, base_clip.h)).with_duration(base_clip.duration)
+        if base_clip.audio:
+            composited = composited.with_audio(base_clip.audio)
+
+        composited.write_videofile(
+            temp_output,
+            fps=max(24, int(base_clip.fps or 30)),
+            codec="libx264",
+            audio_codec="aac",
+            preset=preset,
+            logger=None,
+        )
+
+        os.replace(temp_output, video_path)
+        logger.info("Added dynamic auto captions (%s chunks)", len(timeline))
+        return video_path
+    except Exception as exc:
+        logger.error("Failed to add dynamic captions: %s", exc)
+        try:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+        except Exception:
+            pass
+        return video_path
+    finally:
+        try:
+            if composited:
+                composited.close()
+        except Exception:
+            pass
+        try:
+            if base_clip:
+                base_clip.close()
+        except Exception:
+            pass
 
     overlay_video_path = pick_random_greenscreen_video(greenscreen_dir)
     if not overlay_video_path:
