@@ -42,6 +42,7 @@ jobs:
       ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
       TOR_PROXY_URL: socks5h://127.0.0.1:9050
       AI_USE_TOR_TUNNEL: "false"
+      IMAGE_SEARCH_USE_TOR_TUNNEL: "false"
 
       AI_PROVIDER: auto
       SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}

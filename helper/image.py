@@ -17,6 +17,13 @@ from typing import Optional, List, Tuple, Dict, Any, Union
 load_dotenv()
 
 
+def _env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def get_pexels_api_key():
     return os.getenv("PEXELS_API_KEY")
 
@@ -66,7 +73,9 @@ TEMP_DIR = os.getenv("TEMP_DIR", os.path.join(os.path.dirname(os.path.dirname(__
 # Create images subdirectory
 temp_dir = os.path.join(TEMP_DIR, "generated_images")
 os.makedirs(temp_dir, exist_ok=True)  # Create temp directory if it doesn't exist
-REQUESTS_SESSION = create_requests_session()
+IMAGE_SEARCH_USE_TOR_TUNNEL = _env_bool("IMAGE_SEARCH_USE_TOR_TUNNEL", False)
+REQUESTS_SESSION = create_requests_session(use_tor=IMAGE_SEARCH_USE_TOR_TUNNEL)
+logger.info("Image search Tor tunnel enabled: %s", IMAGE_SEARCH_USE_TOR_TUNNEL)
 
 
 def _log_proxy_usage(provider_name):
@@ -74,7 +83,7 @@ def _log_proxy_usage(provider_name):
     if proxy:
         logger.info("%s requests using proxy: %s", provider_name, proxy)
     else:
-        logger.warning("%s requests are not using Tor proxy", provider_name)
+        logger.info("%s requests using direct network (Tor disabled)", provider_name)
 
 REALISTIC_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
