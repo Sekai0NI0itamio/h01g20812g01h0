@@ -130,7 +130,7 @@ def _resolve_requested_topic(short_index: int, topic_direction: str = "", story_
     if _auto_story_enabled():
         if cleaned_direction:
             return f"{cleaned_direction} #{short_index}"
-        return f"Auto Reddit Story #{short_index}"
+        return f"Auto Story #{short_index}"
     return cleaned_direction or f"Auto Topic #{short_index}"
 
 

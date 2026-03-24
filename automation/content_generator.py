@@ -25,58 +25,57 @@ from automation.scitely_client import (
 logger = logging.getLogger(__name__)
 
 SCRIPT_TEMPLATE_PATH = Path(__file__).resolve().parent / "prompts" / "ai_shorts_script_template.txt"
-DEFAULT_AUTO_STORY_SEED_FILE = Path(__file__).resolve().parent.parent / "reddit_story_seed_pool.txt"
-AUTO_STORY_SUPPORTED_CATEGORIES = (
-    "setting",
-    "role",
-    "relationship",
-    "object",
-    "event",
-    "twist",
-    "tone",
-    "generic",
+DEFAULT_STORY_CHARACTER_FILE = Path(__file__).resolve().parent.parent / "story_character_involvement_pool.txt"
+DEFAULT_STORY_THEME_FILE = Path(__file__).resolve().parent.parent / "story_theme_pool.txt"
+DEFAULT_STORY_IDEA_FILE = Path(__file__).resolve().parent.parent / "story_idea_pool.txt"
+DEFAULT_STORY_PERSPECTIVE_FILE = Path(__file__).resolve().parent.parent / "story_perspective_pool.txt"
+DEFAULT_STORY_SOURCE_LINK_FILE = Path(__file__).resolve().parent.parent / "story_prompt_source_links.txt"
+AUTO_STORY_ALLOWED_FLAIRS = ("Story-related",)
+STORY_COMPONENT_ORDER = (
+    "character_involvement",
+    "theme",
+    "story_idea",
+    "perspective",
 )
-AUTO_STORY_ALLOWED_FLAIRS = ("Venting", "Non-Fiction", "Fiction", "Story-related")
-AUTO_STORY_REALISTIC_FLAIRS = ("Venting", "Story-related", "Non-Fiction")
-AUTO_STORY_HORROR_FLAIRS = ("Fiction",)
-AUTO_STORY_HORROR_KEYWORDS = (
-    "horror",
-    "creepy",
-    "scary",
-    "ghost",
-    "haunted",
-    "paranormal",
-    "eerie",
-    "body cam",
-    "2:17",
-    "3 am",
-    "3am",
-    "unknown room",
-    "delivery that does not exist",
-    "tunnel",
-    "voice in the drain",
-    "night security",
-    "apartment that does not exist",
-    "weird text",
-    "anomaly",
-    "entity",
-)
+STORY_POOL_SPECS = {
+    "character_involvement": {
+        "env": "SHORTS_STORY_CHARACTER_FILE",
+        "path": DEFAULT_STORY_CHARACTER_FILE,
+        "min_count": 100,
+    },
+    "theme": {
+        "env": "SHORTS_STORY_THEME_FILE",
+        "path": DEFAULT_STORY_THEME_FILE,
+        "min_count": 50,
+    },
+    "story_idea": {
+        "env": "SHORTS_STORY_IDEA_FILE",
+        "path": DEFAULT_STORY_IDEA_FILE,
+        "min_count": 200,
+    },
+    "perspective": {
+        "env": "SHORTS_STORY_PERSPECTIVE_FILE",
+        "path": DEFAULT_STORY_PERSPECTIVE_FILE,
+        "min_count": 100,
+    },
+}
 AUTO_STORY_SYSTEM_PROMPT = (
-    "You write original Reddit-style story posts that feel like they belong in a stories/confession subreddit. "
-    "Write in first person only. Start with a strong hook in sentence one. Use concrete details like place, time, "
-    "objects, and small social cues. Keep the voice messy in a human way, but readable. Do not write polished literary "
-    "fiction, essays, morality lessons, or advice threads. Do not mention AI, prompts, or writing process. "
+    "You write original first-person personal stories for short-form video narration. "
+    "The story should feel lived-in, messy, specific, and emotionally believable. "
+    "Use concrete details like stores, receipts, texts, family habits, awkward silences, cars, kitchens, schools, "
+    "and little social cues. Keep the voice natural and human, not polished literary fiction. "
+    "Do not mention AI, prompts, Reddit, subreddits, or the writing process. "
     "Do not use bullet points or headings inside the story body. No sexual content. No graphic violence. No gore. "
-    "Keep tension social, emotional, awkward, or eerie rather than violent."
+    "Keep the tension interpersonal, emotional, awkward, romantic, family-based, or social."
 )
 AUTO_STORY_DISALLOWED_PATTERNS = (
     re.compile(r"\b(sex|sexual|orgasm|masturbat|naked|nude|penis|vagina|cum|boob|boobs|thong|vibrator|horny)\b", re.IGNORECASE),
     re.compile(r"\b(murder|kill(?:ed|ing)?|stab(?:bed|bing)?|gore|corpse|dismember|gun|shoot(?:ing)?|knife attack|strangle(?:d|ing)?|assault(?:ed|ing)?)\b", re.IGNORECASE),
 )
-_USED_AUTO_STORY_SEED_SIGNATURES = set()
+_USED_AUTO_STORY_SIGNATURES = set()
 
 REDDIT_REWRITE_SYSTEM_PROMPT = (
-    "You are a skilled narrative writer. I will give you a Reddit post or a short personal story. "
+    "You are a skilled narrative writer. I will give you a raw personal story or source story. "
     "Your task is to rewrite it as a compelling first-person storytelling piece. Preserve all the key "
     "events and details, but enhance the emotional texture, inner thoughts, and sensory moments to make "
     "the reader feel like they are inside the narrator's head. Use a natural, conversational tone that "
@@ -106,22 +105,6 @@ def _is_auto_story_enabled():
     return os.getenv("SHORTS_AUTO_STORY_ENABLED", "true").strip().lower() == "true"
 
 
-def _get_auto_story_seed_count():
-    configured = str(os.getenv("SHORTS_AUTO_STORY_SEED_COUNT", "5")).strip()
-    try:
-        parsed = int(configured)
-    except ValueError:
-        logger.warning("Invalid SHORTS_AUTO_STORY_SEED_COUNT=%s; forcing 5.", configured)
-        return 5
-    if parsed != 5:
-        logger.info("SHORTS_AUTO_STORY_SEED_COUNT=%s requested, but auto story synthesis currently uses exactly 5 seeds.", parsed)
-    return 5
-
-
-def _get_auto_story_mix():
-    return str(os.getenv("SHORTS_AUTO_STORY_MIX", "mixed_realistic_horror")).strip().lower() or "mixed_realistic_horror"
-
-
 def _env_int(name, default):
     try:
         return int(os.getenv(name, str(default)))
@@ -129,20 +112,16 @@ def _env_int(name, default):
         return int(default)
 
 
-def _get_realistic_story_min_words():
-    return max(250, _env_int("SHORTS_REALISTIC_STORY_MIN_WORDS", 450))
-
-
-def _get_horror_story_min_words():
-    return max(300, _env_int("SHORTS_HORROR_STORY_MIN_WORDS", 550))
+def _get_structured_story_min_words():
+    return max(300, _env_int("SHORTS_STRUCTURED_STORY_MIN_WORDS", 650))
 
 
 def _get_synthetic_story_max_tokens():
-    return max(2200, _env_int("SHORTS_SYNTHETIC_STORY_MAX_TOKENS", 5000))
+    return max(3500, _env_int("SHORTS_SYNTHETIC_STORY_MAX_TOKENS", 7000))
 
 
 def _get_content_package_max_tokens():
-    return max(800, _env_int("SHORTS_CONTENT_PACKAGE_MAX_TOKENS", 3500))
+    return max(1500, _env_int("SHORTS_CONTENT_PACKAGE_MAX_TOKENS", 5000))
 
 
 def _get_default_meme_event_count():
@@ -150,151 +129,60 @@ def _get_default_meme_event_count():
     return max(5, min(10, configured))
 
 
-def _resolve_auto_story_seed_path():
-    raw_value = str(os.getenv("SHORTS_AUTO_STORY_SEED_FILE", str(DEFAULT_AUTO_STORY_SEED_FILE))).strip()
-    seed_path = Path(raw_value)
-    if not seed_path.is_absolute():
-        seed_path = Path(__file__).resolve().parent.parent / seed_path
-    return seed_path
+def _resolve_story_component_path(env_name, default_path):
+    raw_value = str(os.getenv(env_name, str(default_path))).strip()
+    resolved = Path(raw_value)
+    if not resolved.is_absolute():
+        resolved = Path(__file__).resolve().parent.parent / resolved
+    return resolved
 
 
-def _parse_seed_line(raw_line):
-    line = str(raw_line or "").strip()
-    if not line or line.startswith("#"):
-        return None
-
-    if "|" in line:
-        category_raw, seed_text = line.split("|", 1)
-        category = re.sub(r"\s+", "_", category_raw.strip().lower())
-        seed_text = re.sub(r"\s+", " ", seed_text.strip())
-    else:
-        category = "generic"
-        seed_text = re.sub(r"\s+", " ", line)
-
-    if not seed_text:
-        return None
-
-    if category not in AUTO_STORY_SUPPORTED_CATEGORIES:
-        category = "generic"
-
-    return {"category": category, "text": seed_text}
-
-
-def _load_auto_story_seed_pool(seed_path=None):
-    path = Path(seed_path) if seed_path else _resolve_auto_story_seed_path()
+def _load_story_line_pool(path):
     try:
-        raw_text = path.read_text(encoding="utf-8")
+        raw_text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
-        logger.warning("Failed to load auto story seed file from %s: %s", path, exc)
-        return None
+        logger.warning("Failed to load story component file from %s: %s", path, exc)
+        return []
 
-    pool = {category: [] for category in AUTO_STORY_SUPPORTED_CATEGORIES}
-    seen_texts = set()
+    seen = set()
+    lines = []
     for raw_line in raw_text.splitlines():
-        entry = _parse_seed_line(raw_line)
-        if not entry:
+        line = re.sub(r"\s+", " ", str(raw_line or "").strip())
+        if not line or line.startswith("#"):
             continue
-        normalized = entry["text"].strip().lower()
-        if normalized in seen_texts:
+        normalized = line.lower()
+        if normalized in seen:
             continue
-        seen_texts.add(normalized)
-        pool[entry["category"]].append(entry)
-
-    total_entries = sum(len(pool[category]) for category in AUTO_STORY_SUPPORTED_CATEGORIES)
-    if total_entries < _get_auto_story_seed_count():
-        logger.warning(
-            "Auto story seed pool at %s only has %s usable entries; need at least %s.",
-            path,
-            total_entries,
-            _get_auto_story_seed_count(),
-        )
-        return None
-
-    pool["_path"] = str(path)
-    pool["_total"] = total_entries
-    return pool
+        seen.add(normalized)
+        lines.append(line)
+    return lines
 
 
-def _topic_implies_horror(topic):
-    lowered = str(topic or "").strip().lower()
-    if not lowered:
-        return False
-    return any(keyword in lowered for keyword in AUTO_STORY_HORROR_KEYWORDS)
+def _load_story_ingredient_pools():
+    pools = {"_source_files": {}}
+    for key, spec in STORY_POOL_SPECS.items():
+        path = _resolve_story_component_path(spec["env"], spec["path"])
+        lines = _load_story_line_pool(path)
+        if len(lines) < spec["min_count"]:
+            logger.warning(
+                "Story ingredient file %s only has %s usable entries; expected at least %s.",
+                path,
+                len(lines),
+                spec["min_count"],
+            )
+            return None
+        pools[key] = lines
+        pools["_source_files"][key] = str(path)
+    return pools
 
 
-def _select_auto_story_mode(topic):
-    story_mix = _get_auto_story_mix()
-    if _topic_implies_horror(topic):
-        return "horror"
-    if story_mix in {"realistic_only", "realistic", "realistic_confessional"}:
-        return "realistic"
-    if story_mix in {"horror_only", "horror"}:
-        return "horror"
-    return "horror" if random.random() < 0.25 else "realistic"
-
-
-def _choose_auto_story_flair(story_mode):
-    if story_mode == "horror":
-        return random.choice(AUTO_STORY_HORROR_FLAIRS)
-    return random.choice(AUTO_STORY_REALISTIC_FLAIRS)
-
-
-def _pick_seed_from_categories(seed_pool, categories, selected_texts):
-    options = []
-    for category in categories:
-        for entry in seed_pool.get(category, []):
-            normalized = entry["text"].strip().lower()
-            if normalized not in selected_texts:
-                options.append(entry)
-    if not options:
-        return None
-    return random.choice(options)
-
-
-def _sample_story_seed_pack_once(seed_pool, story_mode):
-    selected = []
-    selected_texts = set()
-    preferred_groups = [
-        ("setting",),
-        ("relationship", "role") if story_mode == "realistic" else ("role",),
-        ("event",),
-        ("object",),
-        ("twist",),
-    ]
-    if story_mode == "horror":
-        preferred_groups[2] = ("object",)
-        preferred_groups[3] = ("event", "tone")
-
-    for group in preferred_groups:
-        entry = _pick_seed_from_categories(seed_pool, group, selected_texts)
-        if not entry:
-            continue
-        selected.append(entry)
-        selected_texts.add(entry["text"].strip().lower())
-        if len(selected) >= _get_auto_story_seed_count():
-            return selected
-
-    filler_groups = [("generic",), ("tone",), AUTO_STORY_SUPPORTED_CATEGORIES]
-    for group in filler_groups:
-        while len(selected) < _get_auto_story_seed_count():
-            entry = _pick_seed_from_categories(seed_pool, group, selected_texts)
-            if not entry:
-                break
-            selected.append(entry)
-            selected_texts.add(entry["text"].strip().lower())
-
-    return selected[:_get_auto_story_seed_count()]
-
-
-def _sample_story_seed_pack(seed_pool, story_mode):
-    selected = []
-    for attempt in range(32):
-        candidate = _sample_story_seed_pack_once(seed_pool, story_mode)
-        if len(candidate) < _get_auto_story_seed_count():
-            break
-        signature = tuple(sorted(entry["text"].strip().lower() for entry in candidate))
-        if signature not in _USED_AUTO_STORY_SEED_SIGNATURES or attempt == 31:
-            _USED_AUTO_STORY_SEED_SIGNATURES.add(signature)
+def _sample_story_ingredient_bundle(pools):
+    selected = None
+    for attempt in range(48):
+        candidate = {key: random.choice(pools[key]) for key in STORY_COMPONENT_ORDER}
+        signature = tuple(candidate[key].strip().lower() for key in STORY_COMPONENT_ORDER)
+        if signature not in _USED_AUTO_STORY_SIGNATURES or attempt == 47:
+            _USED_AUTO_STORY_SIGNATURES.add(signature)
             selected = candidate
             break
     return selected
@@ -311,25 +199,28 @@ def _story_contains_disallowed_content(text):
     return any(pattern.search(str(text or "")) for pattern in AUTO_STORY_DISALLOWED_PATTERNS)
 
 
-def _validate_auto_story_payload(payload, selected_seeds, story_mode):
+def _build_story_generation_context(selected_bundle):
+    return {
+        "character_involvement": selected_bundle["character_involvement"],
+        "theme": selected_bundle["theme"],
+        "story_idea": selected_bundle["story_idea"],
+        "perspective": selected_bundle["perspective"],
+    }
+
+
+def _validate_auto_story_payload(payload, selected_bundle):
     if not isinstance(payload, dict):
         raise ValueError("Auto story payload was not a JSON object.")
 
-    required_fields = {"source_title", "source_flair", "story_mode", "seed_terms_used", "story_body"}
+    required_fields = {"source_title", "story_body"}
     missing_fields = sorted(required_fields - set(payload.keys()))
     if missing_fields:
         raise ValueError(f"Auto story payload missing fields: {missing_fields}")
 
     title = _sanitize_auto_story_title(payload.get("source_title"))
-    flair = str(payload.get("source_flair", "")).strip()
     body = str(payload.get("story_body", "")).strip()
-    reported_mode = str(payload.get("story_mode", "")).strip().lower()
     if not title:
         raise ValueError("Auto story title was empty.")
-    if flair not in AUTO_STORY_ALLOWED_FLAIRS:
-        flair = _choose_auto_story_flair(story_mode)
-    if reported_mode not in {"realistic", "horror"}:
-        reported_mode = story_mode
 
     if not body:
         raise ValueError("Auto story body was empty.")
@@ -342,118 +233,98 @@ def _validate_auto_story_payload(payload, selected_seeds, story_mode):
 
     paragraphs = [chunk.strip() for chunk in re.split(r"\n\s*\n", body) if chunk.strip()]
     word_count = len(re.findall(r"\b[\w'-]+\b", body))
-    if reported_mode == "realistic":
-        minimum_word_count = _get_realistic_story_min_words()
-        if word_count < minimum_word_count:
-            raise ValueError(f"Realistic auto story word count {word_count} was below minimum {minimum_word_count}.")
-        if not 4 <= len(paragraphs) <= 8:
-            raise ValueError(f"Realistic auto story used {len(paragraphs)} paragraphs instead of 4-8.")
-    else:
-        minimum_word_count = _get_horror_story_min_words()
-        if word_count < minimum_word_count:
-            raise ValueError(f"Horror auto story word count {word_count} was below minimum {minimum_word_count}.")
-        if not 5 <= len(paragraphs) <= 10:
-            raise ValueError(f"Horror auto story used {len(paragraphs)} paragraphs instead of 5-10.")
+    minimum_word_count = _get_structured_story_min_words()
+    if word_count < minimum_word_count:
+        raise ValueError(f"Structured auto story word count {word_count} was below minimum {minimum_word_count}.")
+    if not 4 <= len(paragraphs) <= 14:
+        raise ValueError(f"Structured auto story used {len(paragraphs)} paragraphs instead of 4-14.")
 
-    seed_texts = [entry["text"] for entry in selected_seeds][: _get_auto_story_seed_count()]
-    if len(seed_texts) != _get_auto_story_seed_count():
-        raise ValueError("Auto story seed selection did not contain exactly 5 entries.")
+    generation_context = _build_story_generation_context(selected_bundle)
 
     return {
         "source_title": title,
-        "source_flair": flair,
-        "story_mode": reported_mode,
-        "seed_terms_used": seed_texts,
+        "source_flair": "Story-related",
+        "story_mode": "structured_first_person",
+        "seed_terms_used": [generation_context[key] for key in STORY_COMPONENT_ORDER],
+        "character_involvement": generation_context["character_involvement"],
+        "theme": generation_context["theme"],
+        "story_idea": generation_context["story_idea"],
+        "perspective": generation_context["perspective"],
+        "generation_context": generation_context,
         "story_body": body,
     }
 
 
-def _build_auto_story_user_prompt(topic, story_mode, selected_seeds):
-    seed_lines = "\n".join(
-        f"- {entry['category']}: {entry['text']}"
-        for entry in selected_seeds
-    )
+def _build_auto_story_user_prompt(topic, selected_bundle):
     topic_bias = str(topic or "").strip() or "(none)"
-
-    if story_mode == "horror":
-        story_requirements = """
-Mode: horror
-- Start grounded and mundane.
-- Introduce one impossible anomaly early.
-- Keep procedural realism: job, location, time, routine, or repeated habit.
-- Escalate unease, not combat.
-- At least {_get_horror_story_min_words()} words.
-- No hard maximum length. Preserve the full story if it keeps escalating well.
-- 5 to 10 short paragraphs.
-- End on a disturbing reveal, unresolved threat, or clipped realization.
-- Source flair should normally be Fiction.
-"""
-    else:
-        story_requirements = """
-Mode: realistic
-- Center on awkward conflict, jealousy, misunderstanding, school or work drama, family tension, public embarrassment, or getting dragged into something weird.
-- At least {_get_realistic_story_min_words()} words.
-- No hard maximum length. Preserve the full story if it keeps unfolding naturally.
-- 4 to 8 short paragraphs.
-- Build around one central incident, one escalation, and one reveal or punchline.
-- End with a reaction gap or comment-bait feeling.
-- Source flair can be Venting, Non-Fiction, or Story-related.
-"""
+    min_words = _get_structured_story_min_words()
 
     return f"""
-Write one original Reddit-style source story post.
+Write one original first-person source story for a short-form drama/confession video.
 
 Optional topic or direction bias:
 {topic_bias}
 
-Use these exact 5 seed elements somewhere in the story:
-{seed_lines}
+Selected story ingredients:
+- character involvement: {selected_bundle["character_involvement"]}
+- theme: {selected_bundle["theme"]}
+- story idea: {selected_bundle["story_idea"]}
+- perspective: {selected_bundle["perspective"]}
 
 Global rules:
+- The narrator must clearly be the selected perspective.
 - First-person only.
 - Immediate hook in sentence one.
+- The selected character involvement must matter to the plot.
+- The selected theme must emotionally drive the story.
+- The selected story idea must be the main engine of the plot.
 - Concrete place, time, object, and dialogue details.
 - Natural human imperfections allowed.
 - No AI language, no meta commentary, no moral lesson.
+- Do not mention Reddit, subreddits, or posts.
 - No bullet lists or headings inside story_body.
 - No sexual content.
 - No graphic violence, combat, gore, or explicit injury.
-- Use ordinary anchors like campus, apartment, workplace, hallway, delivery, parent, ex, text message, neighbor, night shift when relevant.
-
-{story_requirements}
+- Use ordinary anchors like grocery stores, school hallways, apartments, family dinners, work break rooms, text messages, receipts, birthdays, pharmacies, and cars when relevant.
+- At least {min_words} words.
+- No hard maximum length. Preserve the full incident if it keeps escalating naturally.
+- 4 to 14 short paragraphs.
+- End on a strong realization, social sting, emotional turn, or unresolved family tension.
 
 Return exactly one valid JSON object with this exact shape:
 {{
   "source_title": "...",
-  "source_flair": "Venting|Non-Fiction|Fiction|Story-related",
-  "story_mode": "{story_mode}",
-  "seed_terms_used": ["...", "...", "...", "...", "..."],
+  "source_flair": "Story-related",
+  "story_mode": "structured_first_person",
+  "character_involvement": "{selected_bundle["character_involvement"]}",
+  "theme": "{selected_bundle["theme"]}",
+  "story_idea": "{selected_bundle["story_idea"]}",
+  "perspective": "{selected_bundle["perspective"]}",
   "story_body": "..."
 }}
 
 Additional formatting rules:
-- source_title must feel like a raw Reddit post title, curiosity-heavy and hyper-specific.
-- seed_terms_used must echo the same 5 input seed texts in the same order.
+- source_title must feel like a raw curiosity-heavy personal-story title.
+- Echo the exact same selected values for character_involvement, theme, story_idea, and perspective.
 - story_body must be only the story prose with normal paragraph breaks.
 """
 
 
-def _generate_synthetic_reddit_story(topic, model, retries):
+def _generate_synthetic_structured_story(topic, model, retries):
     if not _is_auto_story_enabled():
-        logger.info("Auto Reddit story synthesis disabled by environment.")
+        logger.info("Auto story synthesis disabled by environment.")
         return None
 
-    seed_pool = _load_auto_story_seed_pool()
-    if not seed_pool:
+    ingredient_pools = _load_story_ingredient_pools()
+    if not ingredient_pools:
         return None
 
-    story_mode = _select_auto_story_mode(topic)
-    selected_seeds = _sample_story_seed_pack(seed_pool, story_mode)
-    if len(selected_seeds) < _get_auto_story_seed_count():
-        logger.warning("Could not sample enough unique seeds for auto story generation.")
+    selected_bundle = _sample_story_ingredient_bundle(ingredient_pools)
+    if not selected_bundle:
+        logger.warning("Could not sample enough unique story ingredients for auto story generation.")
         return None
 
-    user_prompt = _build_auto_story_user_prompt(topic, story_mode, selected_seeds)
+    user_prompt = _build_auto_story_user_prompt(topic, selected_bundle)
     messages = [
         {"role": "system", "content": AUTO_STORY_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -468,19 +339,19 @@ def _generate_synthetic_reddit_story(topic, model, retries):
                 temperature=0.95,
             )
             payload = _parse_json_response(response_text)
-            normalized = _validate_auto_story_payload(payload, selected_seeds, story_mode)
-            normalized["source_flair"] = normalized.get("source_flair") or _choose_auto_story_flair(normalized["story_mode"])
-            normalized["seed_source_file"] = seed_pool.get("_path")
+            normalized = _validate_auto_story_payload(payload, selected_bundle)
+            normalized["seed_source_file"] = ingredient_pools.get("_source_files")
+            normalized["source_links_file"] = str(DEFAULT_STORY_SOURCE_LINK_FILE)
             logger.info(
-                "Generated synthetic Reddit story: mode=%s flair=%s title=%s",
-                normalized["story_mode"],
-                normalized["source_flair"],
+                "Generated structured first-person story: perspective=%s theme=%s title=%s",
+                normalized["perspective"],
+                normalized["theme"],
                 normalized["source_title"],
             )
             return normalized
         except Exception as exc:
             logger.warning(
-                "Synthetic Reddit story generation failed (attempt %s/%s): %s",
+                "Structured story generation failed (attempt %s/%s): %s",
                 attempt + 1,
                 retries,
                 exc,
@@ -579,10 +450,12 @@ def _count_words(text):
 def _get_story_package_paragraph_bounds(source_word_count, paragraph_only=False):
     source_word_count = max(0, int(source_word_count or 0))
     if paragraph_only:
-        min_words = min(220, max(120, int(source_word_count * 0.35)))
+        target = max(220, int(source_word_count * 0.65))
+        min_words = min(target, max(120, source_word_count))
         max_words = None
     else:
-        min_words = min(180, max(100, int(source_word_count * 0.25)))
+        target = max(160, int(source_word_count * 0.4))
+        min_words = min(target, max(100, source_word_count))
         max_words = None
     return min_words, max_words
 
@@ -784,12 +657,24 @@ def _build_story_content_package_prompt(
     source_link="",
     paragraph_only=False,
     paragraph_word_bounds=None,
+    generation_context=None,
 ):
     min_words, max_words = paragraph_word_bounds or (120, 220)
     paragraph_length_guidance = (
         f"- paragraph should be at least {min_words} words.\n"
         "- paragraph has no hard maximum length and should preserve the full incident arc."
     )
+    context_block = ""
+    if generation_context:
+        context_block = f"""
+    Selected story ingredients that must remain true:
+    - narrator perspective: {generation_context.get("perspective", "")}
+    - character involvement: {generation_context.get("character_involvement", "")}
+    - emotional theme: {generation_context.get("theme", "")}
+    - story idea: {generation_context.get("story_idea", "")}
+    - Keep these selected ingredients aligned across the paragraph, title, description, and thumbnail direction.
+    - Do not contradict the selected narrator perspective or relationship setup.
+    """
     if paragraph_only:
         return f"""
     You are creating a complete YouTube Short content package from a rewritten first-person story.
@@ -797,6 +682,7 @@ def _build_story_content_package_prompt(
     Topic context: {topic}
     Source title: {source_title}
     Source permalink: {source_link}
+    {context_block}
 
     Rewritten immersive story:
     {rewritten_story}
@@ -832,6 +718,7 @@ def _build_story_content_package_prompt(
     Topic context: {topic}
     Source title: {source_title}
     Source permalink: {source_link}
+    {context_block}
 
     Rewritten immersive story:
     {rewritten_story}
@@ -870,10 +757,12 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries, 
         story_body = str(story.get("body", "")).strip()
         source_title = str(story.get("title", "")).strip()
         source_link = str(story.get("permalink", "")).strip()
+        generation_context = story.get("generation_context") if isinstance(story.get("generation_context"), dict) else None
     else:
         story_body = str(story or "").strip()
         source_title = ""
         source_link = ""
+        generation_context = None
 
     if not story_body:
         return None
@@ -901,6 +790,7 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries, 
                 source_link=source_link,
                 paragraph_only=paragraph_only,
                 paragraph_word_bounds=paragraph_word_bounds,
+                generation_context=generation_context,
             )
             response_content = _create_json_completion(
                 prompt=package_prompt,
@@ -934,8 +824,10 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries, 
                 content_package["source_story_permalink"] = source_link
             if source_title:
                 content_package["source_story_title"] = source_title
+            if generation_context:
+                content_package["source_story_generation_context"] = generation_context
 
-            logger.info("Generated content package from Reddit story successfully")
+            logger.info("Generated content package from source story successfully")
             return content_package
         except Exception as exc:
             logger.warning(
@@ -2108,14 +2000,15 @@ def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3
             return package
         logger.warning("User-provided story generation failed; falling back to topic-based generation")
 
-    synthetic_story = _generate_synthetic_reddit_story(topic=topic, model=model, retries=retries)
+    synthetic_story = _generate_synthetic_structured_story(topic=topic, model=model, retries=retries)
     if synthetic_story:
-        logger.info("Using synthetic Reddit-style source story for script generation")
+        logger.info("Using synthetic first-person source story for script generation")
         package = _build_content_package_from_story(
             topic=synthetic_story.get("source_title") or topic,
             story={
                 "body": synthetic_story.get("story_body", ""),
                 "title": synthetic_story.get("source_title", ""),
+                "generation_context": synthetic_story.get("generation_context"),
             },
             model=model,
             max_tokens=max_tokens,
@@ -2129,6 +2022,12 @@ def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3
             package["source_story_body_raw"] = synthetic_story.get("story_body", "")
             package["source_story_generated"] = True
             package["source_story_seed_file"] = synthetic_story.get("seed_source_file")
+            package["source_story_character_involvement"] = synthetic_story.get("character_involvement")
+            package["source_story_theme"] = synthetic_story.get("theme")
+            package["source_story_idea"] = synthetic_story.get("story_idea")
+            package["source_story_perspective"] = synthetic_story.get("perspective")
+            package["source_story_generation_context"] = synthetic_story.get("generation_context")
+            package["source_story_source_links_file"] = synthetic_story.get("source_links_file")
             package["effective_topic"] = str(
                 synthetic_story.get("source_title")
                 or package.get("title")
@@ -2136,7 +2035,7 @@ def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3
                 or ""
             ).strip()
             return package
-        logger.warning("Synthetic Reddit story package generation failed; falling back to topic-based generation")
+        logger.warning("Synthetic source story package generation failed; falling back to topic-based generation")
 
     # Current date for relevance
     from datetime import datetime

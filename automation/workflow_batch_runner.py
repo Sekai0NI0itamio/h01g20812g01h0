@@ -223,7 +223,7 @@ def copy_artifacts(index: int, topic: str, video_path: Path, script_path: Path, 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sequential batch runner for GitHub Actions")
     parser.add_argument("--count", type=int, default=10, help="Number of shorts to generate")
-    parser.add_argument("--topic-direction", default="", help="Optional topic or story-direction bias for synthetic Reddit story generation")
+    parser.add_argument("--topic-direction", default="", help="Optional topic or story-direction bias for synthetic story generation")
     parser.add_argument("--upload-to-youtube", default="false", help="true/false")
     parser.add_argument("--creator", choices=["auto", "video", "image"], default=coerce_creator_mode(None))
     parser.add_argument("--artifacts-dir", default="workflow_artifacts", help="Folder to collect per-video artifacts")
@@ -247,7 +247,7 @@ def main() -> int:
     logger.info("Topic direction: %s", args.topic_direction or "(auto)")
     logger.info("Creator mode: %s", "video")
     logger.info("YouTube upload: %s", upload_to_youtube)
-    logger.info("Auto Reddit story mode: %s", _auto_story_enabled())
+    logger.info("Auto story mode: %s", _auto_story_enabled())
     if is_github_actions_runtime():
         logger.info("GitHub Actions runtime policy is active")
     if manual_story_text:

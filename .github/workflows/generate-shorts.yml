@@ -12,7 +12,7 @@ on:
         required: false
         default: ""
       story_text:
-        description: Optional full Reddit story text pasted by the user
+        description: Optional full story text pasted by the user
         required: false
         default: ""
       creator_mode:

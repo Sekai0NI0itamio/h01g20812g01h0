@@ -267,7 +267,7 @@ def wait_for_workflow_run(repo, workflow_file, ref, token, started_after, timeou
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--token", help="GitHub token (fallback: GITHUB_TOKEN, GH_TOKEN, or a github_pat* folder in ../..)")
-    p.add_argument("--story-file", default="", help="Optional path to a story text file. Leave empty to let the app synthesize its own Reddit-style story.")
+    p.add_argument("--story-file", default="", help="Optional path to a story text file. Leave empty to let the app synthesize its own structured first-person story.")
     p.add_argument("--topic-direction", default="", help="Optional topic or story-direction bias for synthetic story generation")
     p.add_argument("--video-count", default="1", help="Number of shorts to generate")
     p.add_argument("--creator-mode", choices=["video"], default="video")

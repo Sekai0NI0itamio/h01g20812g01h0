@@ -1,0 +1,100 @@
+kid
+teenage boy
+teenage girl
+older brother
+older sister
+younger brother
+younger sister
+boyfriend
+girlfriend
+husband
+wife
+fiance
+fiancee
+single mom
+single dad
+divorced mom
+divorced dad
+stepmom
+stepdad
+grandmother
+grandfather
+granddaughter
+grandson
+aunt
+uncle
+cousin
+female best friend
+male best friend
+class clown
+quiet student
+varsity athlete
+theater kid
+choir kid
+art student
+gamer boyfriend
+bookish girlfriend
+jealous sister
+protective brother
+strict dad
+tired mom
+grieving son
+grieving daughter
+first-time mom
+first-time dad
+older cousin
+younger cousin
+college freshman
+college roommate
+intern
+receptionist
+grocery store cashier
+pharmacy clerk
+night shift worker
+delivery driver
+fast food worker
+waitress
+waiter
+barber
+hairstylist
+nurse
+nurse assistant
+teacher
+substitute teacher
+coach
+assistant coach
+church volunteer
+youth leader
+babysitter
+nanny
+neighbor girl
+neighbor boy
+landlord's son
+landlord's daughter
+boss's assistant
+coworker
+team captain
+shy boyfriend
+shy girlfriend
+angry son
+angry daughter
+awkward crush
+protective girlfriend
+possessive boyfriend
+oldest child
+middle child
+youngest child
+only child
+foster sister
+foster brother
+newlywed husband
+newlywed wife
+ex-boyfriend
+ex-girlfriend
+family friend
+house sitter
+dog walker
+music student
+dance student
+community college student
+gap-year kid

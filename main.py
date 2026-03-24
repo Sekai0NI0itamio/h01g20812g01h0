@@ -247,7 +247,7 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
         image_mode = isinstance(creator_type, YTShortsCreator_I)
 
         topic = resolve_topic(topic)
-        logger.info("Generating comprehensive content for : %s", topic or "(auto Reddit story)")
+        logger.info("Generating comprehensive content for : %s", topic or "(auto generated story)")
 
         # Generate all content in a single API call.
         content_package = generate_comprehensive_content(
@@ -317,6 +317,12 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                         "source_story_generated": bool(content_package.get("source_story_generated")),
                         "source_story_body_raw": content_package.get("source_story_body_raw"),
                         "source_story_seed_file": content_package.get("source_story_seed_file"),
+                        "source_story_character_involvement": content_package.get("source_story_character_involvement"),
+                        "source_story_theme": content_package.get("source_story_theme"),
+                        "source_story_idea": content_package.get("source_story_idea"),
+                        "source_story_perspective": content_package.get("source_story_perspective"),
+                        "source_story_generation_context": content_package.get("source_story_generation_context"),
+                        "source_story_source_links_file": content_package.get("source_story_source_links_file"),
                     },
                     meta_file,
                     ensure_ascii=False,
@@ -707,7 +713,7 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--topic",
-        help="Optional topic or direction bias. If empty, the app can synthesize a Reddit-style story from the seed pool.",
+        help="Optional topic or direction bias. If empty, the app can synthesize a structured first-person story from the local idea pools.",
     )
     parser.add_argument(
         "--run-mode",
