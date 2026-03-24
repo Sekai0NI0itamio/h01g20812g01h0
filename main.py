@@ -30,6 +30,7 @@ from automation.thumbnail import ThumbnailGenerator
 from helper.minor_helper import ensure_output_directory, parse_script_to_cards, cleanup_temp_directories
 from helper.c05_key_provider import configure_provider_keys_from_c05
 from helper.image import fetch_best_image_for_prompt
+from helper.runtime import coerce_creator_mode, is_github_actions_runtime, is_video_only_runtime, should_use_local_c05_keys
 
 load_dotenv()
 YOUTUBE_TOPIC = os.getenv("YOUTUBE_TOPIC", "")
@@ -184,6 +185,10 @@ def _generate_thumbnail_job(output_dir, safe_title, timestamp, title, script_car
 
 def get_creator_for_day():
     """Alternate between video and image creators based on day"""
+    if is_video_only_runtime():
+        logger.info("Runtime is configured for video-only generation; using YTShortsCreator_V")
+        return YTShortsCreator_V()
+
     today = datetime.datetime.now()
     day_of_year = today.timetuple().tm_yday  # 1-366
     use_images = day_of_year % 2 == 0  # Even days use images, odd days use videos
@@ -691,8 +696,8 @@ def build_arg_parser():
         "creator",
         nargs="?",
         choices=["auto", "video", "image"],
-        default="auto",
-        help="Rendering mode. Default: auto.",
+        default=coerce_creator_mode(None),
+        help="Rendering mode. GitHub Actions runtime forces video mode.",
     )
     parser.add_argument(
         "--topic",
@@ -736,10 +741,15 @@ def prompt_for_run_mode():
 
 
 def creator_from_choice(choice):
-    if choice == "video":
+    resolved_choice = coerce_creator_mode(choice)
+
+    if resolved_choice != (choice or "auto"):
+        logger.info("Creator mode '%s' was overridden by runtime policy to '%s'", choice or "auto", resolved_choice)
+
+    if resolved_choice == "video":
         logger.info("Manually selected video-based creator (YTShortsCreator_V)")
         return YTShortsCreator_V()
-    if choice == "image":
+    if resolved_choice == "image":
         logger.info("Manually selected image-based creator (YTShortsCreator_I)")
         return YTShortsCreator_I()
     return None
@@ -748,7 +758,8 @@ def creator_from_choice(choice):
 def should_use_c05_keys(value):
     if value is not None:
         return value
-    return os.getenv("USE_C05_LOCAL_KEYS", "true").lower() == "true"
+    default = os.getenv("USE_C05_LOCAL_KEYS", "true").lower() == "true"
+    return should_use_local_c05_keys(default=default)
 
 
 if __name__ == "__main__":
@@ -756,6 +767,9 @@ if __name__ == "__main__":
     run_mode = args.run_mode or prompt_for_run_mode()
     auto_upload = run_mode == "auto-upload"
     use_c05_keys = should_use_c05_keys(args.use_c05_keys)
+
+    if is_github_actions_runtime():
+        logger.info("GitHub Actions runtime detected")
 
     logger.info("Selected run mode: %s", run_mode)
     if auto_upload:

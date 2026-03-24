@@ -84,6 +84,10 @@ def main():
 
     # 4) Set ENABLE_YOUTUBE_UPLOAD env var according to arg
     os.environ['ENABLE_YOUTUBE_UPLOAD'] = args.upload
+    os.environ.setdefault('SHORTS_RUNTIME_MODE', 'github_actions')
+    os.environ.setdefault('SHORTS_VIDEO_ONLY', 'true')
+    os.environ.setdefault('SHORTS_CREATOR_MODE', 'video')
+    os.environ.setdefault('USE_C05_LOCAL_KEYS', 'false')
     print(f"ENABLE_YOUTUBE_UPLOAD={args.upload}")
 
     # 5) Run the main script

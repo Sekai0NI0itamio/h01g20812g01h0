@@ -15,6 +15,7 @@ from automation.scitely_client import (
     select_working_provider_for_run,
 )
 from helper.minor_helper import ensure_output_directory
+from helper.runtime import coerce_creator_mode, is_github_actions_runtime
 from main import creator_from_choice, generate_youtube_short
 
 logger = logging.getLogger(__name__)
@@ -225,7 +226,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--count", type=int, default=10, help="Number of shorts to generate")
     parser.add_argument("--topic-direction", default="", help="Optional topic or story-direction bias for synthetic Reddit story generation")
     parser.add_argument("--upload-to-youtube", default="false", help="true/false")
-    parser.add_argument("--creator", choices=["auto", "video", "image"], default="auto")
+    parser.add_argument("--creator", choices=["auto", "video", "image"], default=coerce_creator_mode(None))
     parser.add_argument("--artifacts-dir", default="workflow_artifacts", help="Folder to collect per-video artifacts")
     parser.add_argument("--story-text", default="", help="Optional full story text pasted by the user")
     return parser.parse_args()
@@ -239,6 +240,7 @@ def main() -> int:
 
     upload_to_youtube = _coerce_bool(args.upload_to_youtube)
     manual_story_text = (args.story_text or os.getenv("SHORTS_SOURCE_STORY", "")).strip()
+    resolved_creator_mode = coerce_creator_mode(args.creator)
 
     artifacts_root = Path(args.artifacts_dir).resolve()
     if artifacts_root.exists():
@@ -248,13 +250,15 @@ def main() -> int:
     output_dir = Path(ensure_output_directory())
 
     used_topics: set[str] = set()
-    fixed_creator = creator_from_choice(args.creator)
+    fixed_creator = creator_from_choice(resolved_creator_mode)
 
     logger.info("Starting batch run for %s shorts", args.count)
     logger.info("Topic direction: %s", args.topic_direction or "(auto)")
-    logger.info("Creator mode: %s", args.creator)
+    logger.info("Creator mode: %s", resolved_creator_mode)
     logger.info("YouTube upload: %s", upload_to_youtube)
     logger.info("Auto Reddit story mode: %s", _auto_story_enabled())
+    if is_github_actions_runtime():
+        logger.info("GitHub Actions runtime policy is active")
     if manual_story_text:
         logger.info("Manual story mode enabled from workflow input")
         if args.count != 1:
@@ -277,7 +281,7 @@ def main() -> int:
             display_topic = topic
         logger.info("[%s/%s] Topic bias: %s", index, args.count, display_topic)
 
-        creator_instance = fixed_creator if args.creator != "auto" else None
+        creator_instance = fixed_creator if resolved_creator_mode != "auto" else None
         video_path_str, thumbnail_path_str = generate_youtube_short(
             topic=topic,
             creator_type=creator_instance,

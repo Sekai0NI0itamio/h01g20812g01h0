@@ -16,14 +16,12 @@ on:
         required: false
         default: ""
       creator_mode:
-        description: Rendering mode
+        description: Rendering mode for GitHub Actions
         required: true
-        default: auto
+        default: video
         type: choice
         options:
-          - auto
           - video
-          - image
       upload_to_youtube:
         description: Upload generated videos to YouTube
         required: true
@@ -46,6 +44,9 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       USE_C05_LOCAL_KEYS: "false"
+      SHORTS_RUNTIME_MODE: github_actions
+      SHORTS_VIDEO_ONLY: "true"
+      SHORTS_CREATOR_MODE: video
       SHORTS_SOURCE_STORY: ${{ inputs.story_text }}
       ENABLE_YOUTUBE_UPLOAD: "false"
       ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
@@ -150,7 +151,7 @@ jobs:
           python -m automation.workflow_batch_runner \
             --count "${{ inputs.video_count }}" \
             --topic-direction "${{ inputs.topic_direction }}" \
-            --creator "${{ inputs.creator_mode }}" \
+            --creator "video" \
             --upload-to-youtube "false" \
             --artifacts-dir "workflow_artifacts"
 
