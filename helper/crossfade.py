@@ -10,8 +10,58 @@ from typing import List, Tuple, Dict, Any, Optional
 
 # MoviePy imports
 from moviepy import VideoFileClip, concatenate_videoclips
+from moviepy.video.fx.FadeIn import FadeIn
+from moviepy.video.fx.FadeOut import FadeOut
 
 logger = logging.getLogger(__name__)
+
+
+def _path_has_audio_stream(filepath: str) -> bool:
+    """Best-effort audio detection that does not rely only on MoviePy state."""
+    if not filepath or not os.path.exists(filepath):
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+                filepath,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.stdout.strip():
+            return True
+    except Exception as exc:
+        logger.debug("ffprobe audio detection failed for %s: %s", filepath, exc)
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-i", filepath],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return "Audio:" in (result.stderr or "")
+    except Exception as exc:
+        logger.debug("ffmpeg audio detection fallback failed for %s: %s", filepath, exc)
+
+    return False
+
+
+def _clip_has_audio(clip: Any) -> bool:
+    if getattr(clip, "_has_audio_stream", None) is not None:
+        return bool(getattr(clip, "_has_audio_stream"))
+    return getattr(clip, "audio", None) is not None
 
 def extract_section_index(filepath: str) -> Optional[int]:
     """
@@ -156,7 +206,8 @@ def _try_moviepy_concatenation(
                 # Skip invalid files
                 if not os.path.exists(path) or os.path.getsize(path) == 0:
                     continue
-                    
+
+                has_audio_stream = _path_has_audio_stream(path)
                 clip = VideoFileClip(path)
                 
                 # Skip clips with invalid duration
@@ -165,7 +216,14 @@ def _try_moviepy_concatenation(
                     continue
                     
                 clip._section_idx = idx
-                logger.info(f"Loaded clip {idx}: {os.path.basename(path)}, duration={clip.duration:.2f}s")
+                clip._has_audio_stream = has_audio_stream or getattr(clip, "audio", None) is not None
+                logger.info(
+                    "Loaded clip %s: %s, duration=%.2fs, has_audio=%s",
+                    idx,
+                    os.path.basename(path),
+                    clip.duration,
+                    clip._has_audio_stream,
+                )
                 clips.append(clip)
                 clip_indices.append(idx)
             except Exception as e:
@@ -193,7 +251,7 @@ def _try_moviepy_concatenation(
             clips_with_idx.sort(key=lambda x: x[0])
             clips = [clip for _, clip in clips_with_idx]
 
-        clips_have_audio = any(getattr(clip, "audio", None) is not None for clip in clips)
+        clips_have_audio = any(_clip_has_audio(clip) for clip in clips)
 
         # Try method 1: Direct crossfade
         if crossfade_duration > 0:
@@ -294,11 +352,11 @@ def _try_manual_fades(
             
             # Add fade in for all except the first clip
             if i > 0:
-                modified_clip = modified_clip.fadein(crossfade_duration/2)
+                modified_clip = modified_clip.with_effects([FadeIn(crossfade_duration / 2)])
                 
             # Add fade out for all except the last clip
             if i < len(clips) - 1:
-                modified_clip = modified_clip.fadeout(crossfade_duration/2)
+                modified_clip = modified_clip.with_effects([FadeOut(crossfade_duration / 2)])
                 
             clips_with_fades.append(modified_clip)
         

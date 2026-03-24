@@ -224,8 +224,8 @@ REALISTIC_USER_AGENTS = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
 ]
 
-DEFAULT_AI_IMAGE_PROVIDER = "PollinationsAI"
-DEFAULT_AI_IMAGE_MODEL = "flux"
+DEFAULT_AI_IMAGE_PROVIDER = "HuggingSpace"
+DEFAULT_AI_IMAGE_MODEL = "flux-kontext-dev"
 MIN_ACCEPTABLE_IMAGE_DIMENSION = int(os.getenv("MIN_ACCEPTABLE_IMAGE_DIMENSION", "720"))
 MIN_ACCEPTABLE_IMAGE_PIXELS = int(os.getenv("MIN_ACCEPTABLE_IMAGE_PIXELS", "650000"))
 ENABLE_G4F_IMAGE_FALLBACK = _env_bool("ENABLE_G4F_IMAGE_FALLBACK", True)
@@ -233,6 +233,7 @@ ENABLE_G4F_IMAGE_FALLBACK = _env_bool("ENABLE_G4F_IMAGE_FALLBACK", True)
 QUERY_STOPWORDS = {
     "the", "and", "with", "from", "that", "this", "into", "over", "under", "through",
     "photorealistic", "portrait", "background", "showing", "displaying", "screen", "phone",
+    "meme",
 }
 
 
@@ -303,6 +304,94 @@ def _download_image_url(image_url, file_path, referer):
     return file_path
 
 
+def _build_g4f_attempts(provider_name, model_name):
+    attempts = []
+
+    def add_attempt(provider, model):
+        key = (str(provider or "").strip(), str(model or "").strip())
+        if not key[0] or not key[1]:
+            return
+        if key not in attempts:
+            attempts.append(key)
+
+    add_attempt(provider_name, model_name)
+    add_attempt(os.getenv("G4F_IMAGE_PROVIDER"), os.getenv("G4F_IMAGE_MODEL"))
+    add_attempt("HuggingSpace", "flux-kontext-dev")
+    add_attempt("PollinationsAI", "kontext")
+    add_attempt("PollinationsAI", "flux")
+
+    return attempts
+
+
+def _generate_local_fallback_image(prompt, style="photorealistic", file_path=None):
+    """Last-resort local fallback so image-mode renders can still complete."""
+    if not _env_bool("ENABLE_LOCAL_IMAGE_PLACEHOLDER_FALLBACK", True):
+        return None
+
+    if not file_path:
+        file_path = os.path.join(temp_dir, f"local_fallback_{int(time.time())}_{random.randint(1000, 9999)}.jpg")
+
+    seed = sum((idx + 1) * ord(ch) for idx, ch in enumerate(str(prompt or "")[:240]))
+    rng = random.Random(seed)
+
+    palette = [
+        (17, 24, 39),
+        (24, 58, 98),
+        (81, 45, 168),
+        (16, 94, 78),
+        (180, 83, 9),
+        (153, 27, 27),
+    ]
+    bg_a = palette[seed % len(palette)]
+    bg_b = palette[(seed + 3) % len(palette)]
+
+    img = Image.new("RGB", resolution, bg_a)
+    overlay = Image.new("RGBA", resolution, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    for idx in range(10):
+        accent = palette[(seed + idx) % len(palette)]
+        alpha = 45 + ((idx * 9) % 45)
+        width = rng.randint(int(resolution[0] * 0.25), int(resolution[0] * 0.9))
+        height = rng.randint(int(resolution[1] * 0.10), int(resolution[1] * 0.38))
+        x0 = rng.randint(-180, resolution[0] - 60)
+        y0 = rng.randint(-220, resolution[1] - 120)
+        overlay_draw.ellipse(
+            [(x0, y0), (x0 + width, y0 + height)],
+            fill=(*accent, alpha),
+        )
+
+    overlay = overlay.filter(ImageFilter.GaussianBlur(92))
+    composite = Image.alpha_composite(img.convert("RGBA"), overlay)
+
+    gradient = Image.new("RGBA", resolution, (0, 0, 0, 0))
+    gradient_draw = ImageDraw.Draw(gradient)
+    for y in range(resolution[1]):
+        mix = y / max(1, resolution[1] - 1)
+        color = tuple(int(bg_a[i] * (1 - mix) + bg_b[i] * mix) for i in range(3))
+        gradient_draw.line([(0, y), (resolution[0], y)], fill=(*color, 28))
+    composite = Image.alpha_composite(composite, gradient)
+
+    frame = Image.new("RGBA", resolution, (0, 0, 0, 0))
+    frame_draw = ImageDraw.Draw(frame)
+    panel_margin = int(resolution[0] * 0.08)
+    frame_draw.rounded_rectangle(
+        [
+            (panel_margin, int(resolution[1] * 0.14)),
+            (resolution[0] - panel_margin, int(resolution[1] * 0.86)),
+        ],
+        radius=48,
+        outline=(255, 255, 255, 36),
+        width=3,
+        fill=(255, 255, 255, 10),
+    )
+    composite = Image.alpha_composite(composite, frame)
+    composite.convert("RGB").save(file_path, quality=95)
+
+    logger.info("Local fallback image created at %s for prompt '%s'", file_path, (prompt or "")[:60])
+    return file_path
+
+
 def _extract_candidate_image_urls(html_text):
     if not html_text:
         return []
@@ -324,6 +413,135 @@ def _extract_candidate_image_urls(html_text):
                 candidates.append(m)
 
     return candidates
+
+
+@measure_time
+def _fetch_image_from_pixabay(query, file_path=None):
+    """Fetch an image from Pixabay based on query."""
+    if not file_path:
+        file_path = os.path.join(temp_dir, f"pixabay_{int(time.time())}_{random.randint(1000, 9999)}.jpg")
+
+    pixabay_api_key = get_pixabay_api_key()
+    if not pixabay_api_key:
+        logger.warning("No Pixabay API key provided")
+        return None
+
+    try:
+        _log_proxy_usage("Pixabay")
+        for candidate in _build_query_candidates(query):
+            params = {
+                "key": pixabay_api_key,
+                "q": candidate,
+                "image_type": "photo",
+                "orientation": "vertical",
+                "safesearch": "true",
+                "per_page": 5,
+                "min_width": 720,
+            }
+            response = REQUESTS_SESSION.get("https://pixabay.com/api/", params=params, timeout=20)
+
+            if response.status_code != 200:
+                logger.warning("Pixabay API error: %s for query '%s'", response.status_code, candidate)
+                continue
+
+            hits = (response.json() or {}).get("hits") or []
+            if not hits:
+                logger.info("Pixabay returned no results for query '%s'", candidate)
+                continue
+
+            for hit in hits[:5]:
+                image_url = hit.get("largeImageURL") or hit.get("webformatURL")
+                if not image_url:
+                    continue
+
+                img_response = REQUESTS_SESSION.get(image_url, timeout=20)
+                if img_response.status_code != 200 or not img_response.content:
+                    continue
+
+                with open(file_path, "wb") as f:
+                    f.write(img_response.content)
+                logger.info("Pixabay image downloaded to %s (query='%s')", file_path, candidate)
+                return file_path
+
+    except Exception as e:
+        logger.error(f"Error fetching image from Pixabay: {e}")
+
+    return None
+
+
+@measure_time
+def _fetch_image_from_wikimedia_commons(query, file_path=None):
+    """Fetch an image from Wikimedia Commons without requiring an API key."""
+    if not file_path:
+        file_path = os.path.join(temp_dir, f"wikimedia_{int(time.time())}_{random.randint(1000, 9999)}.jpg")
+
+    try:
+        _log_proxy_usage("Wikimedia Commons")
+        headers = _browser_headers("https://commons.wikimedia.org/")
+
+        for candidate in _build_query_candidates(query):
+            search_response = REQUESTS_SESSION.get(
+                "https://commons.wikimedia.org/w/api.php",
+                params={
+                    "action": "query",
+                    "format": "json",
+                    "list": "search",
+                    "srsearch": candidate,
+                    "srnamespace": 6,
+                    "srlimit": 5,
+                },
+                headers=headers,
+                timeout=20,
+            )
+            if search_response.status_code != 200:
+                logger.warning("Wikimedia search error: %s for query '%s'", search_response.status_code, candidate)
+                continue
+
+            results = (search_response.json() or {}).get("query", {}).get("search") or []
+            if not results:
+                logger.info("Wikimedia returned no results for query '%s'", candidate)
+                continue
+
+            titles = [item.get("title") for item in results if item.get("title")]
+            if not titles:
+                continue
+
+            image_response = REQUESTS_SESSION.get(
+                "https://commons.wikimedia.org/w/api.php",
+                params={
+                    "action": "query",
+                    "format": "json",
+                    "prop": "imageinfo",
+                    "iiprop": "url|size",
+                    "iiurlwidth": 1280,
+                    "titles": "|".join(titles),
+                },
+                headers=headers,
+                timeout=20,
+            )
+            if image_response.status_code != 200:
+                logger.warning("Wikimedia image lookup error: %s for query '%s'", image_response.status_code, candidate)
+                continue
+
+            pages = ((image_response.json() or {}).get("query") or {}).get("pages") or {}
+            for page in pages.values():
+                imageinfo = (page or {}).get("imageinfo") or []
+                if not imageinfo:
+                    continue
+
+                image_url = imageinfo[0].get("thumburl") or imageinfo[0].get("url")
+                if not image_url:
+                    continue
+
+                written = _download_image_url(image_url, file_path, "https://commons.wikimedia.org/")
+                if written:
+                    logger.info("Wikimedia Commons image downloaded to %s (query='%s')", file_path, candidate)
+                    return written
+
+    except Exception as e:
+        logger.error(f"Error fetching image from Wikimedia Commons: {e}")
+
+    return None
 
 
 def _fetch_image_from_brave(query, file_path):
@@ -535,19 +753,40 @@ def _generate_image_from_prompt(prompt, style="photorealistic", file_path=None, 
 
     async def _run():
         AsyncClient, provider_module = _load_g4f()
-        provider = _resolve_g4f_provider(provider_name, provider_module)
         client = AsyncClient()
-        response = await client.images.generate(
-            prompt=prompt_text,
-            model=model_name,
-            provider=provider,
-            response_format="b64_json",
-            n=1,
-        )
-        items = _get_g4f_response_items(response)
-        if not items:
-            raise RuntimeError("g4f returned no images.")
-        _save_g4f_image_item(items[0], Path(file_path))
+        last_exc = None
+
+        for attempt_provider_name, attempt_model_name in _build_g4f_attempts(provider_name, model_name):
+            try:
+                provider = _resolve_g4f_provider(attempt_provider_name, provider_module)
+                response = await client.images.generate(
+                    prompt=prompt_text,
+                    model=attempt_model_name,
+                    provider=provider,
+                    response_format="b64_json",
+                    n=1,
+                )
+                items = _get_g4f_response_items(response)
+                if not items:
+                    raise RuntimeError("g4f returned no images.")
+                _save_g4f_image_item(items[0], Path(file_path))
+                logger.info(
+                    "g4f image generated via provider=%s model=%s",
+                    attempt_provider_name,
+                    attempt_model_name,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "g4f image attempt failed for provider=%s model=%s prompt='%s': %s",
+                    attempt_provider_name,
+                    attempt_model_name,
+                    prompt[:50],
+                    exc,
+                )
+
+        raise last_exc or RuntimeError("g4f image generation failed after all configured attempts.")
 
     try:
         asyncio.run(_run())
@@ -578,6 +817,8 @@ def fetch_best_image_for_prompt(prompt, style="photorealistic", allow_ai_fallbac
         ("DuckDuckGo", lambda: fetch_image_from_duckduckgo(prompt)),
         ("Unsplash", lambda: _fetch_image_from_unsplash(prompt)),
         ("Pexels", lambda: _fetch_image_from_pexels(prompt)),
+        ("Pixabay", lambda: _fetch_image_from_pixabay(prompt)),
+        ("Wikimedia Commons", lambda: _fetch_image_from_wikimedia_commons(prompt)),
     ]
 
     for provider_name, loader in attempts:
@@ -591,6 +832,11 @@ def fetch_best_image_for_prompt(prompt, style="photorealistic", allow_ai_fallbac
         image_path = generate_image_from_prompt(prompt, style=style)
         if image_path:
             return image_path
+
+    logger.info("Trying local generated image fallback for: %s...", prompt[:30])
+    image_path = _generate_local_fallback_image(prompt, style=style)
+    if image_path and _accept_image_candidate(image_path, "local"):
+        return image_path
 
     logger.error("All image generation methods failed for prompt: %s...", prompt[:50])
     return None
@@ -693,13 +939,23 @@ def _fetch_image_from_pexels(query, file_path=None):
                 logger.info("Pexels returned no results for query '%s'", candidate)
                 continue
 
-            image_url = data["photos"][0]["src"]["large"]
-            img_response = REQUESTS_SESSION.get(image_url, timeout=20)
-            if img_response.status_code == 200:
-                with open(file_path, "wb") as f:
-                    f.write(img_response.content)
-                logger.info("Pexels image downloaded to %s (query='%s')", file_path, candidate)
-                return file_path
+            for photo in data["photos"][:5]:
+                src = photo.get("src", {})
+                image_url = (
+                    src.get("portrait")
+                    or src.get("large2x")
+                    or src.get("original")
+                    or src.get("large")
+                )
+                if not image_url:
+                    continue
+
+                img_response = REQUESTS_SESSION.get(image_url, timeout=20)
+                if img_response.status_code == 200 and img_response.content:
+                    with open(file_path, "wb") as f:
+                        f.write(img_response.content)
+                    logger.info("Pexels image downloaded to %s (query='%s')", file_path, candidate)
+                    return file_path
 
     except Exception as e:
         logger.error(f"Error fetching image from Pexels: {e}")
