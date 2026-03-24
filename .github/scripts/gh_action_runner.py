@@ -46,6 +46,7 @@ def main():
     parser.add_argument('--count', default=os.environ.get('SHORTS_VIDEO_COUNT', '1'))
     parser.add_argument('--topic-direction', default=os.environ.get('SHORTS_TOPIC_DIRECTION', ''))
     parser.add_argument('--story-text', default=os.environ.get('SHORTS_SOURCE_STORY', ''))
+    parser.add_argument('--main-video-mode', choices=['yes-main', 'no-main'], default=os.environ.get('SHORTS_MAIN_VIDEO_MODE', 'yes-main'))
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -90,6 +91,7 @@ def main():
     os.environ.setdefault('SHORTS_RUNTIME_MODE', 'github_actions')
     os.environ.setdefault('SHORTS_VIDEO_ONLY', 'true')
     os.environ.setdefault('SHORTS_CREATOR_MODE', 'video')
+    os.environ['SHORTS_MAIN_VIDEO_MODE'] = args.main_video_mode
     os.environ.setdefault('SHORTS_ALLOW_LOCAL_DEV', 'false')
     os.environ.setdefault('USE_C05_LOCAL_KEYS', 'false')
     print(f"ENABLE_YOUTUBE_UPLOAD={args.upload}")

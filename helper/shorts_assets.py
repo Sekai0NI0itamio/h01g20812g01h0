@@ -289,6 +289,8 @@ def add_anime_greenscreen_overlay_to_video(
     requested_multiplier = max(1.0, float(os.getenv("SHORTS_GREENSCREEN_SIZE_MULTIPLIER", "50")))
     max_height_ratio = max(0.25, min(0.98, float(os.getenv("SHORTS_GREENSCREEN_MAX_HEIGHT_RATIO", "0.92"))))
     effective_height_ratio = max(0.18, min(max_height_ratio, float(scale_factor) * requested_multiplier))
+    x_margin_ratio = max(0.0, min(0.12, float(os.getenv("SHORTS_GREENSCREEN_X_MARGIN_RATIO", "0.0"))))
+    y_margin_ratio = max(0.0, min(0.12, float(os.getenv("SHORTS_GREENSCREEN_Y_MARGIN_RATIO", "0.005"))))
 
     temp_output = video_path.replace('.mp4', '_with_anime_overlay.mp4')
 
@@ -296,8 +298,8 @@ def add_anime_greenscreen_overlay_to_video(
         f"[1:v][0:v]scale2ref=w=-1:h=main_h*{effective_height_ratio:.4f}[anime_s][base];"
         f"[anime_s]chromakey=0x00FF00:{chroma_similarity:.4f}:{chroma_blend:.4f}[anime];"
         f"[base][anime]overlay="
-        f"x='max(0,min(main_w-overlay_w,main_w*0.03))':"
-        f"y='max(0,min(main_h-overlay_h,main_h-overlay_h-main_h*0.03))':"
+        f"x='max(0,min(main_w-overlay_w,main_w*{x_margin_ratio:.4f}))':"
+        f"y='max(0,min(main_h-overlay_h,main_h-overlay_h-main_h*{y_margin_ratio:.4f}))':"
         f"shortest=1[outv]"
     )
 

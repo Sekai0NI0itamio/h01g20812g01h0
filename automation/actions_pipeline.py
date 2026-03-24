@@ -53,6 +53,14 @@ def _coerce_bool(value) -> bool:
     raise ValueError(f"Invalid boolean value: {value}")
 
 
+def _normalize_main_video_mode(value: str | None = None) -> str:
+    normalized = str(value or os.getenv("SHORTS_MAIN_VIDEO_MODE", "yes-main")).strip().lower()
+    normalized = normalized.replace("_", "-").replace(" ", "-")
+    if normalized in {"no-main", "nomain", "attention-only", "no"}:
+        return "no-main"
+    return "yes-main"
+
+
 def _auto_story_enabled() -> bool:
     return os.getenv("SHORTS_AUTO_STORY_ENABLED", "true").strip().lower() == "true"
 
@@ -363,6 +371,17 @@ def fetch_visual_assets_stage(bundle_dir: Path, short_index: int) -> Path:
     if not sections:
         raise RuntimeError("Transcript sections are required before fetching visuals")
 
+    main_video_mode = _normalize_main_video_mode()
+    if main_video_mode == "no-main":
+        payload = {
+            "main_video_mode": main_video_mode,
+            "sections": [],
+            "skipped_main_visual_fetch": True,
+        }
+        _save_json(_bundle_file(bundle_dir, "visual_manifest.json"), payload)
+        logger.info("[%s] Skipped main visual fetch because main video mode is No Main", short_index)
+        return bundle_dir
+
     texts = [str(section.get("text", "") or "").strip() for section in sections]
     overall_topic = str(content.get("effective_topic") or content.get("title") or content.get("requested_topic") or "")
     raw_queries = generate_batch_video_queries(texts, overall_topic=overall_topic)
@@ -433,7 +452,13 @@ def fetch_visual_assets_stage(bundle_dir: Path, short_index: int) -> Path:
             }
         )
 
-    _save_json(_bundle_file(bundle_dir, "visual_manifest.json"), manifest)
+    _save_json(
+        _bundle_file(bundle_dir, "visual_manifest.json"),
+        {
+            "main_video_mode": main_video_mode,
+            "sections": manifest,
+        },
+    )
     logger.info("[%s] Prepared %s timed visual assets", short_index, len(manifest))
     return bundle_dir
 
@@ -484,6 +509,75 @@ def _build_visual_clips(bundle_dir: Path, sections: list[dict], manifest: list[d
     return visual_clips
 
 
+def _compose_attention_driven_section_clips(sections: list[dict], main_visual_clips=None):
+    from moviepy import ColorClip, CompositeVideoClip
+    from helper.shorts_assets import (
+        build_brainrot_overlay_clip,
+        pick_random_brainrot_start_time,
+        pick_random_brainrot_video,
+    )
+
+    mode = _normalize_main_video_mode()
+    attention_video_path = pick_random_brainrot_video()
+    canvas_size = (1080, 1920)
+    top_height_ratio = 1.0 if mode == "no-main" else max(
+        0.15,
+        min(0.5, float(os.getenv("SHORTS_BRAINROT_YES_MAIN_HEIGHT_RATIO", "0.3333"))),
+    )
+
+    if not attention_video_path:
+        if mode == "no-main":
+            raise RuntimeError("No attention-grab videos are available for No Main mode")
+        logger.warning("No attention-grab video available; proceeding without top attention overlay")
+        return main_visual_clips or []
+
+    total_duration = sum(max(0.12, float(section.get("duration", 0.12) or 0.12)) for section in sections)
+    attention_elapsed = pick_random_brainrot_start_time(
+        attention_video_path,
+        min_remaining_seconds=max(12.0, min(60.0, total_duration)),
+    )
+    composed_clips = []
+
+    for idx, section in enumerate(sections):
+        section_duration = max(0.12, float(section.get("duration", 0.12) or 0.12))
+        attention_clip = build_brainrot_overlay_clip(
+            attention_video_path,
+            start_time=attention_elapsed,
+            duration=section_duration,
+            canvas_size=canvas_size,
+            top_height_ratio=top_height_ratio,
+        )
+        attention_elapsed += section_duration
+
+        if mode == "no-main":
+            if attention_clip is None:
+                raise RuntimeError(f"Failed to build attention-grab clip for section {idx}")
+            composed = attention_clip.with_duration(section_duration)
+        else:
+            main_clip = main_visual_clips[idx] if main_visual_clips else None
+            if main_clip is None:
+                main_clip = ColorClip(size=canvas_size, color=(0, 0, 0)).with_duration(section_duration)
+            else:
+                main_clip = main_clip.with_duration(section_duration)
+
+            layers = [main_clip]
+            if attention_clip:
+                layers.append(attention_clip)
+            composed = CompositeVideoClip(layers, size=canvas_size).with_duration(section_duration)
+
+        composed._section_idx = idx
+        composed._debug_info = f"Section {idx}: {str(section.get('text', '') or '')[:48]}"
+        composed_clips.append(composed)
+
+    logger.info(
+        "Built %s section clips using main video mode '%s'%s",
+        len(composed_clips),
+        mode,
+        f" with attention overlay ratio {top_height_ratio:.2f}" if mode != "no-main" else " using attention-only background",
+    )
+    return composed_clips
+
+
 def render_base_stage(bundle_dir: Path, short_index: int) -> Path:
     from automation.renderer import render_video
     from helper.shorts_assets import add_narration_and_background_music_to_video
@@ -491,14 +585,27 @@ def render_base_stage(bundle_dir: Path, short_index: int) -> Path:
     require_actions_runtime("render-base")
     bundle_dir = _stage_bundle_dir(bundle_dir)
     sections = _load_json(_bundle_file(bundle_dir, "transcript_sections.json"), default=[])
-    manifest = _load_json(_bundle_file(bundle_dir, "visual_manifest.json"), default=[])
+    manifest_payload = _load_json(_bundle_file(bundle_dir, "visual_manifest.json"), default={})
     narration_path = _bundle_file(bundle_dir, "master_narration.wav")
 
-    if not sections or not manifest:
-        raise RuntimeError("render-base requires transcript sections and visual manifest")
+    if isinstance(manifest_payload, list):
+        main_video_mode = _normalize_main_video_mode()
+        manifest = manifest_payload
+    else:
+        main_video_mode = _normalize_main_video_mode(manifest_payload.get("main_video_mode"))
+        manifest = list(manifest_payload.get("sections", []) or [])
+
+    if not sections:
+        raise RuntimeError("render-base requires transcript sections")
+    if main_video_mode != "no-main" and not manifest:
+        raise RuntimeError("render-base requires a visual manifest when main video mode is Yes Main")
 
     render_dir = _ensure_dir(bundle_dir / "render")
-    visual_clips = _build_visual_clips(bundle_dir, sections, manifest)
+    main_visual_clips = None
+    if main_video_mode != "no-main":
+        main_visual_clips = _build_visual_clips(bundle_dir, sections, manifest)
+
+    visual_clips = _compose_attention_driven_section_clips(sections, main_visual_clips=main_visual_clips)
     base_visual_path = _bundle_file(bundle_dir, "base_visuals.mp4")
 
     render_video(
@@ -607,6 +714,11 @@ def collect_artifacts_stage(bundle_dir: Path, short_index: int, artifacts_dir: P
     content = _load_content(bundle_dir)
     final_video_path = _bundle_file(bundle_dir, "final_video.mp4")
     thumbnail_path = _bundle_file(bundle_dir, "thumbnail.jpg")
+    visual_manifest_payload = _load_json(_bundle_file(bundle_dir, "visual_manifest.json"), default={})
+    if isinstance(visual_manifest_payload, dict):
+        main_video_mode = _normalize_main_video_mode(visual_manifest_payload.get("main_video_mode"))
+    else:
+        main_video_mode = _normalize_main_video_mode()
 
     if not final_video_path.exists():
         raise FileNotFoundError(f"Missing final video: {final_video_path}")
@@ -628,6 +740,7 @@ def collect_artifacts_stage(bundle_dir: Path, short_index: int, artifacts_dir: P
         "title": str(content.get("title") or "").strip(),
         "description": str(content.get("description") or "").strip(),
         "generated_at": str(content.get("generated_at") or ""),
+        "main_video_mode": main_video_mode,
         "video_source": str(final_video_path),
         "thumbnail_source": str(thumbnail_path),
     }

@@ -22,6 +22,14 @@ on:
         type: choice
         options:
           - video
+      main_video_mode:
+        description: Whether to build the main fetched visual track or use attention video only
+        required: true
+        default: yes-main
+        type: choice
+        options:
+          - yes-main
+          - no-main
       upload_to_youtube:
         description: Upload generated videos to YouTube
         required: true
@@ -44,6 +52,7 @@ env:
   SHORTS_VIDEO_ONLY: "true"
   SHORTS_CREATOR_MODE: video
   SHORTS_ALLOW_LOCAL_DEV: "false"
+  SHORTS_MAIN_VIDEO_MODE: ${{ inputs.main_video_mode }}
   SHORTS_SOURCE_STORY: ${{ inputs.story_text }}
   ENABLE_YOUTUBE_UPLOAD: "false"
   ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
@@ -87,7 +96,9 @@ env:
   SHORTS_SYNTHETIC_STORY_MAX_TOKENS: "5000"
   SHORTS_CONTENT_PACKAGE_MAX_TOKENS: "4000"
   SHORTS_MUSIC_DIR: Music
+  SHORTS_BRAINROT_DIR: AttentionGrabBrainRotVideos
   SHORTS_GREENSCREEN_DIR: GreenScreenAnimeGirls
+  SHORTS_BRAINROT_YES_MAIN_HEIGHT_RATIO: "0.3333"
   RENDER_RESERVED_MEMORY_GB: "1.0"
   RENDER_RESERVED_CPU_CORES: "0"
   RENDER_MEMORY_PER_WORKER_GB: "0.8"

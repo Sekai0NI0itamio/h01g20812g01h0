@@ -271,6 +271,7 @@ def main():
     p.add_argument("--topic-direction", default="", help="Optional topic or story-direction bias for synthetic story generation")
     p.add_argument("--video-count", default="1", help="Number of shorts to generate")
     p.add_argument("--creator-mode", choices=["video"], default="video")
+    p.add_argument("--main-video-mode", choices=["yes-main", "no-main"], default="yes-main")
     p.add_argument("--upload-to-youtube", choices=["true", "false"], default="true")
     p.add_argument("--use-tor-tunnel", choices=["true", "false"], default="true")
     p.add_argument("--workflow", default="generate-shorts.yml", help="workflow filename in .github/workflows")
@@ -307,6 +308,7 @@ def main():
         "upload_to_youtube": str(args.upload_to_youtube),
         "story_text": story,
         "creator_mode": args.creator_mode,
+        "main_video_mode": args.main_video_mode,
         "use_tor_tunnel": str(args.use_tor_tunnel),
         "freevoicereader_cookie": cookie_string or ""
     }
