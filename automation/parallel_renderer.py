@@ -30,7 +30,7 @@ except ImportError:
             'ffmpeg_threads': 2
         }
     
-    def concatenate_with_crossfade(rendered_paths, output_file, preset="ultrafast", crossfade_duration=0.5):
+    def concatenate_with_crossfade(rendered_paths, output_file, preset="ultrafast", crossfade_duration=0.0):
         """Fallback implementation of concatenate_with_crossfade if import fails."""
         if not rendered_paths:
             raise ValueError("No paths to concatenate")
@@ -71,7 +71,7 @@ load_dotenv()
 TEMP_DIR = os.getenv("TEMP_DIR", tempfile.gettempdir())
 
 # Default crossfade duration
-DEFAULT_CROSSFADE_DURATION = 1.0  # Increased to 1 second
+DEFAULT_CROSSFADE_DURATION = 0.0
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +272,7 @@ def render_clips_parallel(
     preset: str = "ultrafast",
     resource_config: Dict[str, Any] = None,
     clean_temp: bool = True,
-    crossfade_duration: float = 0.5
+    crossfade_duration: float = 0.0
 ) -> str:
     """
     Render clips in parallel using threads and FFmpeg.
@@ -388,7 +388,7 @@ def render_clips_sequential(
     logger=None,
     temp_dir: str = None,
     preset: str = "ultrafast",
-    crossfade_duration: float = 0.5
+    crossfade_duration: float = 0.0
 ) -> str:
     """
     Simple fallback function that renders clips sequentially.

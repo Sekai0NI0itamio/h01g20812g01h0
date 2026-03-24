@@ -7,16 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from automation.scitely_client import (
-    ScitelyAPIError,
-    create_chat_completion,
-    get_default_chat_provider,
-    get_scitely_model,
-    select_working_provider_for_run,
-)
-from helper.minor_helper import ensure_output_directory
-from helper.runtime import coerce_creator_mode, is_github_actions_runtime
-from main import creator_from_choice, generate_youtube_short
+from automation.actions_pipeline import run_batch_pipeline
+from helper.runtime import coerce_creator_mode, is_github_actions_runtime, require_actions_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +68,13 @@ def _clean_topic(text: str) -> str:
 
 
 def generate_auto_topic(direction: str, index: int, used_topics: set[str]) -> str:
+    from automation.scitely_client import (
+        ScitelyAPIError,
+        create_chat_completion,
+        get_default_chat_provider,
+        get_scitely_model,
+    )
+
     direction_text = direction.strip() if direction else ""
     if direction_text:
         user_direction = f"General direction: {direction_text}"
@@ -234,6 +233,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    require_actions_runtime("workflow batch runner")
+    from automation.scitely_client import select_working_provider_for_run
 
     if args.count < 1:
         raise ValueError("--count must be at least 1")
@@ -242,79 +243,25 @@ def main() -> int:
     manual_story_text = (args.story_text or os.getenv("SHORTS_SOURCE_STORY", "")).strip()
     resolved_creator_mode = coerce_creator_mode(args.creator)
 
-    artifacts_root = Path(args.artifacts_dir).resolve()
-    if artifacts_root.exists():
-        shutil.rmtree(artifacts_root)
-    artifacts_root.mkdir(parents=True, exist_ok=True)
-
-    output_dir = Path(ensure_output_directory())
-
-    used_topics: set[str] = set()
-    fixed_creator = creator_from_choice(resolved_creator_mode)
-
     logger.info("Starting batch run for %s shorts", args.count)
     logger.info("Topic direction: %s", args.topic_direction or "(auto)")
-    logger.info("Creator mode: %s", resolved_creator_mode)
+    logger.info("Creator mode: %s", "video")
     logger.info("YouTube upload: %s", upload_to_youtube)
     logger.info("Auto Reddit story mode: %s", _auto_story_enabled())
     if is_github_actions_runtime():
         logger.info("GitHub Actions runtime policy is active")
     if manual_story_text:
         logger.info("Manual story mode enabled from workflow input")
-        if args.count != 1:
-            logger.warning("Manual story mode forces count=1 (was %s)", args.count)
-            args.count = 1
 
     selected_provider = select_working_provider_for_run()
     logger.info("AI provider locked for this run: %s", selected_provider)
 
-    for index in range(1, args.count + 1):
-        if manual_story_text:
-            topic = _clean_topic(args.topic_direction) or "User Provided Story"
-            display_topic = topic
-        elif _auto_story_enabled():
-            topic = _clean_topic(args.topic_direction)
-            display_topic = topic or f"Auto Reddit Story #{index}"
-        else:
-            topic = generate_auto_topic(args.topic_direction, index, used_topics)
-            used_topics.add(topic)
-            display_topic = topic
-        logger.info("[%s/%s] Topic bias: %s", index, args.count, display_topic)
-
-        creator_instance = fixed_creator if resolved_creator_mode != "auto" else None
-        video_path_str, thumbnail_path_str = generate_youtube_short(
-            topic=topic,
-            creator_type=creator_instance,
-            auto_upload=upload_to_youtube,
-            source_story_text=manual_story_text,
-        )
-
-        if not video_path_str:
-            latest_video = find_latest_generated_video(output_dir)
-            if latest_video:
-                logger.warning(
-                    "Primary video path missing for item %s, using latest generated video fallback: %s",
-                    index,
-                    latest_video,
-                )
-                video_path_str = str(latest_video)
-            else:
-                raise RuntimeError(f"Video generation failed for item {index}")
-
-        video_path = Path(video_path_str).resolve()
-        script_path = derive_script_path(video_path)
-        meta_path = derive_meta_path(video_path)
-
-        if not video_path.exists():
-            raise FileNotFoundError(f"Missing generated video: {video_path}")
-        if not script_path.exists():
-            raise FileNotFoundError(f"Missing generated script file: {script_path}")
-
-        thumb_path = ensure_thumbnail(video_path, thumbnail_path_str, output_dir)
-        if not thumb_path.exists():
-            raise FileNotFoundError(f"Missing generated thumbnail: {thumb_path}")
-
-        copy_artifacts(index, topic or display_topic, video_path, script_path, thumb_path, artifacts_root, meta_path=meta_path)
+    artifacts_root = run_batch_pipeline(
+        count=args.count,
+        topic_direction=args.topic_direction,
+        story_text=manual_story_text,
+        artifacts_dir=args.artifacts_dir,
+    )
 
     logger.info("Batch run completed. Artifacts directory: %s", artifacts_root)
     return 0

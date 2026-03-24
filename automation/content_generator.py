@@ -122,6 +122,34 @@ def _get_auto_story_mix():
     return str(os.getenv("SHORTS_AUTO_STORY_MIX", "mixed_realistic_horror")).strip().lower() or "mixed_realistic_horror"
 
 
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _get_realistic_story_min_words():
+    return max(250, _env_int("SHORTS_REALISTIC_STORY_MIN_WORDS", 450))
+
+
+def _get_horror_story_min_words():
+    return max(300, _env_int("SHORTS_HORROR_STORY_MIN_WORDS", 550))
+
+
+def _get_synthetic_story_max_tokens():
+    return max(2200, _env_int("SHORTS_SYNTHETIC_STORY_MAX_TOKENS", 5000))
+
+
+def _get_content_package_max_tokens():
+    return max(800, _env_int("SHORTS_CONTENT_PACKAGE_MAX_TOKENS", 3500))
+
+
+def _get_default_meme_event_count():
+    configured = _env_int("SHORTS_MEME_EVENT_TARGET_COUNT", 7)
+    return max(5, min(10, configured))
+
+
 def _resolve_auto_story_seed_path():
     raw_value = str(os.getenv("SHORTS_AUTO_STORY_SEED_FILE", str(DEFAULT_AUTO_STORY_SEED_FILE))).strip()
     seed_path = Path(raw_value)
@@ -315,13 +343,15 @@ def _validate_auto_story_payload(payload, selected_seeds, story_mode):
     paragraphs = [chunk.strip() for chunk in re.split(r"\n\s*\n", body) if chunk.strip()]
     word_count = len(re.findall(r"\b[\w'-]+\b", body))
     if reported_mode == "realistic":
-        if not 450 <= word_count <= 800:
-            raise ValueError(f"Realistic auto story word count {word_count} was outside 450-800.")
+        minimum_word_count = _get_realistic_story_min_words()
+        if word_count < minimum_word_count:
+            raise ValueError(f"Realistic auto story word count {word_count} was below minimum {minimum_word_count}.")
         if not 4 <= len(paragraphs) <= 8:
             raise ValueError(f"Realistic auto story used {len(paragraphs)} paragraphs instead of 4-8.")
     else:
-        if not 550 <= word_count <= 950:
-            raise ValueError(f"Horror auto story word count {word_count} was outside 550-950.")
+        minimum_word_count = _get_horror_story_min_words()
+        if word_count < minimum_word_count:
+            raise ValueError(f"Horror auto story word count {word_count} was below minimum {minimum_word_count}.")
         if not 5 <= len(paragraphs) <= 10:
             raise ValueError(f"Horror auto story used {len(paragraphs)} paragraphs instead of 5-10.")
 
@@ -352,7 +382,8 @@ Mode: horror
 - Introduce one impossible anomaly early.
 - Keep procedural realism: job, location, time, routine, or repeated habit.
 - Escalate unease, not combat.
-- 550 to 950 words.
+- At least {_get_horror_story_min_words()} words.
+- No hard maximum length. Preserve the full story if it keeps escalating well.
 - 5 to 10 short paragraphs.
 - End on a disturbing reveal, unresolved threat, or clipped realization.
 - Source flair should normally be Fiction.
@@ -361,7 +392,8 @@ Mode: horror
         story_requirements = """
 Mode: realistic
 - Center on awkward conflict, jealousy, misunderstanding, school or work drama, family tension, public embarrassment, or getting dragged into something weird.
-- 450 to 800 words.
+- At least {_get_realistic_story_min_words()} words.
+- No hard maximum length. Preserve the full story if it keeps unfolding naturally.
 - 4 to 8 short paragraphs.
 - Build around one central incident, one escalation, and one reveal or punchline.
 - End with a reaction gap or comment-bait feeling.
@@ -432,7 +464,7 @@ def _generate_synthetic_reddit_story(topic, model, retries):
             response_text = _create_text_completion(
                 messages=messages,
                 model=model,
-                max_tokens=2200,
+                max_tokens=_get_synthetic_story_max_tokens(),
                 temperature=0.95,
             )
             payload = _parse_json_response(response_text)
@@ -547,11 +579,11 @@ def _count_words(text):
 def _get_story_package_paragraph_bounds(source_word_count, paragraph_only=False):
     source_word_count = max(0, int(source_word_count or 0))
     if paragraph_only:
-        min_words = min(180, max(90, int(source_word_count * 0.40)))
-        max_words = max(min_words + 30, min(320, max(140, int(source_word_count * 0.75))))
+        min_words = min(220, max(120, int(source_word_count * 0.35)))
+        max_words = None
     else:
-        min_words = min(160, max(80, int(source_word_count * 0.30)))
-        max_words = max(min_words + 30, min(280, max(130, int(source_word_count * 0.60))))
+        min_words = min(180, max(100, int(source_word_count * 0.25)))
+        max_words = None
     return min_words, max_words
 
 
@@ -754,6 +786,10 @@ def _build_story_content_package_prompt(
     paragraph_word_bounds=None,
 ):
     min_words, max_words = paragraph_word_bounds or (120, 220)
+    paragraph_length_guidance = (
+        f"- paragraph should be at least {min_words} words.\n"
+        "- paragraph has no hard maximum length and should preserve the full incident arc."
+    )
     if paragraph_only:
         return f"""
     You are creating a complete YouTube Short content package from a rewritten first-person story.
@@ -780,7 +816,7 @@ def _build_story_content_package_prompt(
     - paragraph must stay as one paragraph, but it should use short clear sentences with periods.
     - paragraph must not feel like one giant run-on sentence.
     - paragraph must preserve the full incident arc instead of collapsing into a teaser summary.
-    - paragraph should target {min_words}-{max_words} words.
+    {paragraph_length_guidance}
     - paragraph should end with a comment CTA line such as "Comment what you think about this down in the comments."
     - do not include labels, bullet points, timestamps, or a separate line-by-line script.
     - title should be 40-60 characters and click-worthy.
@@ -815,7 +851,7 @@ def _build_story_content_package_prompt(
     - paragraph must stay as one paragraph, but it should use short clear sentences with periods.
     - paragraph must not feel like one giant run-on sentence.
     - paragraph must preserve the full incident arc instead of collapsing into a teaser summary.
-    - paragraph should target {min_words}-{max_words} words.
+    {paragraph_length_guidance}
     - paragraph should end with a comment CTA line such as "Comment what you think about this down in the comments."
     - script must be derived from the paragraph (break the paragraph into concise caption-sized beats).
     - script should be 8 to 16 lines, one caption/beat per line, each 4-12 words.
@@ -886,10 +922,8 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries, 
             content_package["paragraph"] = paragraph
             paragraph_word_count = _count_words(paragraph)
             min_words, max_words = paragraph_word_bounds
-            if paragraph_word_count < min_words or paragraph_word_count > max_words:
-                raise ValueError(
-                    f"Paragraph word count {paragraph_word_count} outside target range {min_words}-{max_words}."
-                )
+            if paragraph_word_count < min_words:
+                raise ValueError(f"Paragraph word count {paragraph_word_count} was below minimum {min_words}.")
 
             if paragraph_only:
                 content_package["script"] = paragraph
@@ -1786,6 +1820,174 @@ def generate_timed_meme_insertion_plan(
     return []
 
 
+def generate_paired_meme_plan(
+    script_sections,
+    sound_effect_files,
+    topic="",
+    model=None,
+    retries=3,
+    min_events=5,
+    max_events=10,
+):
+    """
+    Generate a unified meme plan where each event includes both the meme image
+    query and the paired sound effect file.
+    """
+    if not script_sections or not sound_effect_files:
+        return []
+
+    if not _has_chat_ai_provider():
+        logger.warning("No AI provider available; skipping paired meme planning")
+        return []
+
+    model = _get_completion_model(model)
+    logger.info("Using AI provider %s for paired meme planning", _get_active_completion_provider())
+
+    min_effective = max(1, min(int(min_events), len(script_sections)))
+    max_effective = max(min_effective, min(int(max_events), len(script_sections)))
+    target_events = max(min_effective, min(max_effective, _get_default_meme_event_count()))
+
+    meme_duration_min = float(os.getenv("SHORTS_MEME_DURATION_MIN", "2.0"))
+    meme_duration_max = float(os.getenv("SHORTS_MEME_DURATION_MAX", "2.5"))
+    formatted_sections = _format_timed_sections_for_prompt(script_sections)
+    formatted_sfx = "\n".join([f"- {name}" for name in sorted(sound_effect_files)])
+
+    prompt = f"""
+    You are planning meme reaction beats for a narrated short-form video.
+    Topic: {topic}
+
+    These sections come from real Whisper timestamps, so timing must fit the narration naturally.
+
+    Transcript sections:
+    {formatted_sections}
+
+    Available sound effect files (use exact file names only):
+    {formatted_sfx}
+
+    Rules:
+    1) Return between {min_effective} and {max_effective} events. Aim for exactly {target_events}.
+    2) Each event must include BOTH a meme-friendly searchable image query and one exact sound effect file.
+    3) Use distinct section_index values.
+    4) query must be 2-6 words and suitable for browser/image search.
+    5) offset_seconds is relative to the section start.
+    6) duration_seconds should be {meme_duration_min:.1f} to {meme_duration_max:.1f} seconds when the section is long enough, and must fit inside the section.
+    7) Choose memes and sounds that match the meaning and tone of the selected section.
+
+    Return ONLY valid JSON in this exact shape:
+    {{
+      "events": [
+        {{
+          "section_index": 1,
+          "query": "awkward stare meme",
+          "sound_effect_file": "Vine boom sound effect.mp3",
+          "offset_seconds": 0.3,
+          "duration_seconds": 2.2
+        }}
+      ]
+    }}
+    """
+
+    for attempt in range(retries):
+        try:
+            response_content = _create_json_completion(
+                prompt=prompt,
+                model=model,
+                max_tokens=900,
+                temperature=0.45,
+            )
+            parsed = _parse_json_response(response_content)
+            raw_events = parsed.get("events", []) if isinstance(parsed, dict) else []
+
+            valid_names = set(sound_effect_files)
+            normalized = []
+            used_sections = set()
+            for item in raw_events:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    section_index = int(item.get("section_index"))
+                except Exception:
+                    continue
+                if section_index < 0 or section_index >= len(script_sections) or section_index in used_sections:
+                    continue
+
+                query = str(item.get("query", "")).strip()
+                sound_effect_file = str(item.get("sound_effect_file", "")).strip()
+                if not query or sound_effect_file not in valid_names:
+                    continue
+
+                section_duration = max(0.12, float(script_sections[section_index].get("duration", 0.12) or 0.12))
+                try:
+                    offset_seconds = float(item.get("offset_seconds", 0.0))
+                except Exception:
+                    offset_seconds = 0.0
+                try:
+                    duration_seconds = float(item.get("duration_seconds", 2.0))
+                except Exception:
+                    duration_seconds = 2.0
+
+                offset_seconds = max(0.0, min(max(0.0, section_duration - 0.1), offset_seconds))
+                remaining = max(0.25, section_duration - offset_seconds)
+                duration_seconds = max(
+                    0.25,
+                    min(remaining, max(meme_duration_min, min(meme_duration_max, duration_seconds))),
+                )
+
+                normalized.append(
+                    {
+                        "section_index": section_index,
+                        "query": query,
+                        "sound_effect_file": sound_effect_file,
+                        "offset_seconds": offset_seconds,
+                        "duration_seconds": duration_seconds,
+                    }
+                )
+                used_sections.add(section_index)
+
+            normalized.sort(key=lambda x: x["section_index"])
+
+            if len(normalized) < min_effective:
+                used_sections = {entry["section_index"] for entry in normalized}
+                for idx, section in enumerate(script_sections):
+                    if len(normalized) >= min_effective:
+                        break
+                    if idx in used_sections:
+                        continue
+
+                    fallback_query = " ".join(str(section.get("text", "")).split()[:6]).strip() or "reaction meme"
+                    fallback_duration = min(
+                        max(0.25, float(section.get("duration", meme_duration_max) or meme_duration_max)),
+                        meme_duration_max,
+                    )
+                    normalized.append(
+                        {
+                            "section_index": idx,
+                            "query": fallback_query,
+                            "sound_effect_file": sound_effect_files[len(normalized) % len(sound_effect_files)],
+                            "offset_seconds": 0.2,
+                            "duration_seconds": max(meme_duration_min, fallback_duration),
+                        }
+                    )
+                    used_sections.add(idx)
+
+            normalized.sort(key=lambda x: x["section_index"])
+            logger.info("Generated paired meme plan with %s events", len(normalized[:max_effective]))
+            return normalized[:max_effective]
+        except Exception as exc:
+            logger.warning(
+                "Paired meme planning failed (attempt %s/%s): %s",
+                attempt + 1,
+                retries,
+                exc,
+            )
+            if isinstance(exc, ScitelyAPIError) and getattr(exc, "provider", "") == "scitely":
+                disable_scitely(exc)
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+
+    return []
+
+
 def generate_timed_word_color_plan(script_sections, topic="", model=None, retries=3):
     """
     Ask the LLM which transcript words deserve custom highlight colors.
@@ -1864,7 +2066,7 @@ def generate_timed_word_color_plan(script_sections, topic="", model=None, retrie
 
     return {}
 
-def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3, source_story_text=None, paragraph_only=False):
+def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3, source_story_text=None, paragraph_only=False):
     """
     Generate a comprehensive content package for a YouTube Short in a single API call.
 
@@ -1887,6 +2089,8 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
 
     model = _get_completion_model(model)
     logger.info("Using AI provider %s for comprehensive content generation", _get_active_completion_provider())
+    if max_tokens is None:
+        max_tokens = _get_content_package_max_tokens()
 
     user_story_text = str(source_story_text or "").strip()
     if user_story_text:
@@ -1971,6 +2175,7 @@ def generate_comprehensive_content(topic, model=None, max_tokens=800, retries=3,
        - DOES NOT include tips, advice, steps, or list formats
        - DOES NOT include a presenter intro or title readout
        - DOES NOT use external citations, statistics, or quotes
+       - Preserves the full story arc with no hard maximum length
        - Ends with a comment CTA sentence
 
     2. "title": A catchy, engaging title for the YouTube Short (40-60 characters)

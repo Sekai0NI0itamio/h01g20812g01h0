@@ -10,6 +10,8 @@ import math
 from moviepy import (
     AudioFileClip,
     CompositeAudioClip,
+    CompositeVideoClip,
+    ImageClip,
     VideoFileClip,
     concatenate_audioclips,
     concatenate_videoclips,
@@ -31,6 +33,7 @@ DEFAULT_GREENSCREEN_DIR = os.getenv(
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv")
 HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_LAST_GREENSCREEN_SELECTION = {}
 
 
 def get_default_font_path():
@@ -86,14 +89,44 @@ def pick_random_greenscreen_video(greenscreen_dir=None):
         logger.warning("No green-screen anime videos found in %s", greenscreen_dir or DEFAULT_GREENSCREEN_DIR)
         return None
 
-    # SystemRandom avoids any accidental deterministic seeding from elsewhere.
-    selected = random.SystemRandom().choice(video_files)
+    directory_key = os.path.abspath(greenscreen_dir or DEFAULT_GREENSCREEN_DIR)
+    previous = _LAST_GREENSCREEN_SELECTION.get(directory_key)
+    choices = [path for path in video_files if path != previous] if previous and len(video_files) > 1 else list(video_files)
+    selected = random.SystemRandom().choice(choices)
+    _LAST_GREENSCREEN_SELECTION[directory_key] = selected
+
+    if len(video_files) == 1:
+        logger.warning("Only one green-screen anime video is available, so repeats are unavoidable: %s", os.path.basename(selected))
+
     logger.info(
         "Selected green-screen anime video (%s candidates): %s",
         len(video_files),
         os.path.basename(selected),
     )
     return selected
+
+
+def pick_random_greenscreen_start_time(video_path, minimum_remaining_seconds=2.0):
+    if not video_path or not os.path.exists(video_path):
+        return 0.0
+
+    source_video = None
+    try:
+        source_video = VideoFileClip(video_path).without_audio()
+        duration = float(source_video.duration or 0.0)
+        max_start = duration - float(minimum_remaining_seconds)
+        if max_start <= 0:
+            return 0.0
+        return random.SystemRandom().uniform(0.0, max_start)
+    except Exception as exc:
+        logger.warning("Failed to compute random greenscreen start time for %s: %s", video_path, exc)
+        return 0.0
+    finally:
+        try:
+            if source_video:
+                source_video.close()
+        except Exception:
+            pass
 
 
 def pick_random_brainrot_start_time(video_path, min_remaining_seconds=60.0):
@@ -241,6 +274,7 @@ def add_anime_greenscreen_overlay_to_video(
     overlay_video_path = selected_overlay_path or pick_random_greenscreen_video(greenscreen_dir)
     if not overlay_video_path:
         return video_path
+    overlay_start = pick_random_greenscreen_start_time(overlay_video_path, minimum_remaining_seconds=6.0)
 
     chroma_similarity = (
         float(os.getenv("SHORTS_GREENSCREEN_CHROMA_SIMILARITY", "0.24"))
@@ -270,6 +304,7 @@ def add_anime_greenscreen_overlay_to_video(
     cmd = [
         'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
         '-i', video_path,
+        '-ss', f"{overlay_start:.3f}",
         '-stream_loop', '-1', '-i', overlay_video_path,
         '-filter_complex', filter_complex,
         '-map', '[outv]',
@@ -286,8 +321,9 @@ def add_anime_greenscreen_overlay_to_video(
         subprocess.run(cmd, check=True)
         os.replace(temp_output, video_path)
         logger.info(
-            "Added green-screen anime overlay using %s (requested_multiplier=%sx effective_height_ratio=%.2f)",
+            "Added green-screen anime overlay using %s (start=%.2fs requested_multiplier=%sx effective_height_ratio=%.2f)",
             os.path.basename(overlay_video_path),
+            overlay_start,
             int(requested_multiplier) if requested_multiplier.is_integer() else requested_multiplier,
             effective_height_ratio,
         )
@@ -300,6 +336,221 @@ def add_anime_greenscreen_overlay_to_video(
         except Exception:
             pass
         return video_path
+
+
+def add_narration_and_background_music_to_video(
+    video_path,
+    narration_audio_path,
+    music_dir=None,
+    selected_music_path=None,
+    narration_volume=1.0,
+    music_volume=None,
+    fps=30,
+    preset="ultrafast",
+):
+    """
+    Replace/compose the video's audio with the master narration track plus optional
+    looped background music. The narration is the source of truth for final runtime.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return video_path
+    if not narration_audio_path or not os.path.exists(narration_audio_path):
+        logger.warning("Narration audio missing, skipping narration/music mix")
+        return video_path
+
+    base_clip = None
+    narration_clip = None
+    music_clip = None
+    mixed_audio = None
+    final_clip = None
+    temp_output = video_path.replace(".mp4", "_with_master_audio.mp4")
+
+    try:
+        base_clip = VideoFileClip(video_path)
+        narration_clip = AudioFileClip(narration_audio_path).with_volume_scaled(float(narration_volume))
+
+        target_duration = float(narration_clip.duration or 0.0)
+        if target_duration <= 0.05:
+            logger.warning("Narration duration is too short to mix; leaving video unchanged")
+            return video_path
+
+        base_clip = base_clip.with_duration(target_duration)
+
+        selected_music = selected_music_path or pick_random_background_music(music_dir)
+        audio_layers = [narration_clip]
+
+        if selected_music and os.path.exists(selected_music):
+            music_clip = _build_looped_audio_clip(selected_music, target_duration)
+            if music_clip:
+                if music_volume is None:
+                    music_volume = float(os.getenv("SHORTS_MUSIC_VOLUME", "0.08"))
+                music_clip = music_clip.with_volume_scaled(float(music_volume))
+                audio_layers.append(music_clip)
+
+        mixed_audio = CompositeAudioClip(audio_layers).with_duration(target_duration)
+        final_clip = base_clip.with_audio(mixed_audio).with_duration(target_duration)
+        final_clip.write_videofile(
+            temp_output,
+            fps=max(24, int(base_clip.fps or fps or 30)),
+            codec="libx264",
+            audio_codec="aac",
+            preset=preset,
+            logger=None,
+        )
+        os.replace(temp_output, video_path)
+        logger.info(
+            "Added master narration%s to video",
+            f" and background music using {os.path.basename(selected_music)}" if selected_music and os.path.exists(selected_music) else "",
+        )
+        return video_path
+    except Exception as exc:
+        logger.error("Failed to add master narration/background music: %s", exc)
+        try:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+        except Exception:
+            pass
+        return video_path
+    finally:
+        for clip in (final_clip, mixed_audio, music_clip, narration_clip, base_clip):
+            try:
+                if clip:
+                    clip.close()
+            except Exception:
+                pass
+
+
+def add_paired_meme_overlays_to_video(
+    video_path,
+    meme_events,
+    preset="ultrafast",
+):
+    """
+    Overlay timed meme images and their paired sound effects after the anime overlay
+    so memes remain visually on top and audio effects stay aligned with the GPT plan.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return video_path
+    if not meme_events:
+        return video_path
+
+    base_clip = None
+    composited = None
+    overlay_clips = []
+    sfx_layers = []
+    temp_output = video_path.replace(".mp4", "_with_paired_memes.mp4")
+    sound_effects_dir = os.path.join(PROJECT_ROOT, "SoundEffects")
+
+    try:
+        base_clip = VideoFileClip(video_path)
+        max_width_ratio = max(0.05, min(0.5, float(os.getenv("SHORTS_MEME_OVERLAY_WIDTH_RATIO", "0.20"))))
+        max_height_ratio = max(0.05, min(0.5, float(os.getenv("SHORTS_MEME_OVERLAY_HEIGHT_RATIO", "0.20"))))
+        vertical_center_ratio = max(0.05, min(0.5, float(os.getenv("SHORTS_MEME_OVERLAY_VERTICAL_CENTER_RATIO", "0.20"))))
+        sfx_volume = float(os.getenv("SHORTS_SFX_VOLUME", "0.45"))
+
+        layers = [base_clip]
+        for event in meme_events:
+            meme_path = event.get("image_path")
+            if not meme_path or not os.path.exists(meme_path):
+                continue
+
+            event_start = max(0.0, float(event.get("start_time", 0.0) or 0.0))
+            if event_start >= base_clip.duration:
+                continue
+
+            event_duration = min(
+                max(0.25, float(event.get("duration_seconds", 2.0) or 2.0)),
+                max(0.25, base_clip.duration - event_start),
+            )
+
+            image_clip = ImageClip(meme_path)
+            max_width = max(1, int(base_clip.w * max_width_ratio))
+            max_height = max(1, int(base_clip.h * max_height_ratio))
+            scale = min(max_width / max(1, image_clip.w), max_height / max(1, image_clip.h))
+            resized_width = max(1, int(image_clip.w * scale))
+            meme_clip = image_clip.resized(width=resized_width)
+
+            pos_x = max(0, int((base_clip.w - meme_clip.w) / 2))
+            vertical_center = int(base_clip.h * vertical_center_ratio)
+            pos_y = max(0, min(base_clip.h - meme_clip.h, int(vertical_center - (meme_clip.h / 2))))
+
+            meme_clip = (
+                meme_clip
+                .with_start(event_start)
+                .with_duration(event_duration)
+                .with_position((pos_x, pos_y))
+            )
+
+            overlay_clips.append(meme_clip)
+            layers.append(meme_clip)
+
+            sfx_file = str(event.get("sound_effect_file", "") or "").strip()
+            if sfx_file:
+                sfx_path = os.path.join(sound_effects_dir, sfx_file)
+                if os.path.exists(sfx_path):
+                    try:
+                        sfx_clip_raw = AudioFileClip(sfx_path).with_volume_scaled(sfx_volume)
+                        sfx_duration = min(float(sfx_clip_raw.duration or 0.0), event_duration)
+                        if sfx_duration > 0.05:
+                            sfx_layers.append(sfx_clip_raw.subclipped(0, sfx_duration).with_start(event_start))
+                        else:
+                            sfx_clip_raw.close()
+                    except Exception as exc:
+                        logger.warning("Failed to attach meme sound effect %s: %s", sfx_file, exc)
+
+        if len(layers) == 1:
+            return video_path
+
+        composited = CompositeVideoClip(layers, size=(base_clip.w, base_clip.h)).with_duration(base_clip.duration)
+
+        audio_layers = []
+        if base_clip.audio:
+            audio_layers.append(base_clip.audio)
+        audio_layers.extend(sfx_layers)
+        if audio_layers:
+            composited = composited.with_audio(CompositeAudioClip(audio_layers).with_duration(base_clip.duration))
+
+        composited.write_videofile(
+            temp_output,
+            fps=max(24, int(base_clip.fps or 30)),
+            codec="libx264",
+            audio_codec="aac",
+            preset=preset,
+            logger=None,
+        )
+
+        os.replace(temp_output, video_path)
+        logger.info("Added paired meme overlays (%s items)", len(layers) - 1)
+        return video_path
+    except Exception as exc:
+        logger.error("Failed to add paired meme overlays: %s", exc)
+        try:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+        except Exception:
+            pass
+        return video_path
+    finally:
+        for clip in overlay_clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        for clip in sfx_layers:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        try:
+            if composited:
+                composited.close()
+        except Exception:
+            pass
+        try:
+            if base_clip:
+                base_clip.close()
+        except Exception:
+            pass
 
 
 def add_timed_meme_overlays_to_video(

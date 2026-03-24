@@ -30,7 +30,13 @@ from automation.thumbnail import ThumbnailGenerator
 from helper.minor_helper import ensure_output_directory, parse_script_to_cards, cleanup_temp_directories
 from helper.c05_key_provider import configure_provider_keys_from_c05
 from helper.image import fetch_best_image_for_prompt
-from helper.runtime import coerce_creator_mode, is_github_actions_runtime, is_video_only_runtime, should_use_local_c05_keys
+from helper.runtime import (
+    coerce_creator_mode,
+    is_github_actions_runtime,
+    is_video_only_runtime,
+    require_actions_runtime,
+    should_use_local_c05_keys,
+)
 
 load_dotenv()
 YOUTUBE_TOPIC = os.getenv("YOUTUBE_TOPIC", "")
@@ -764,6 +770,7 @@ def should_use_c05_keys(value):
 
 if __name__ == "__main__":
     args = build_arg_parser().parse_args()
+    require_actions_runtime("main.py local CLI")
     run_mode = args.run_mode or prompt_for_run_mode()
     auto_upload = run_mode == "auto-upload"
     use_c05_keys = should_use_c05_keys(args.use_c05_keys)

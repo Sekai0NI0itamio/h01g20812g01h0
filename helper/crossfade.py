@@ -99,7 +99,7 @@ def extract_section_index(filepath: str) -> Optional[int]:
 def concatenate_with_crossfade(
     clip_paths: List[Tuple[int, str]],
     output_file: str,
-    crossfade_duration: float = 1.0,
+    crossfade_duration: float = 0.0,
     preset: str = "ultrafast"
 ) -> str:
     """

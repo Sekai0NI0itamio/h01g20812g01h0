@@ -37,64 +37,66 @@ on:
         required: false
         default: ""
 
+env:
+  PYTHONUNBUFFERED: "1"
+  USE_C05_LOCAL_KEYS: "false"
+  SHORTS_RUNTIME_MODE: github_actions
+  SHORTS_VIDEO_ONLY: "true"
+  SHORTS_CREATOR_MODE: video
+  SHORTS_ALLOW_LOCAL_DEV: "false"
+  SHORTS_SOURCE_STORY: ${{ inputs.story_text }}
+  ENABLE_YOUTUBE_UPLOAD: "false"
+  ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
+  TOR_PROXY_URL: socks5h://127.0.0.1:9050
+  AI_USE_TOR_TUNNEL: "false"
+  IMAGE_SEARCH_USE_TOR_TUNNEL: "false"
+  VIDEO_FETCH_USE_TOR_TUNNEL: "false"
+  AI_PROVIDER: nvidia
+  AI_PROVIDER_ORDER: nvidia,g4f,scitely
+  SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
+  SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
+  SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
+  NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+  NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
+  PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+  PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+  UNSPLASH_API_KEY: ${{ secrets.UNSPLASH_API_KEY || secrets.UNSPLASH_ACCESS_KEY || secrets.UNSPLASH_ACCESS_ID }}
+  USE_FREEVOICEREADER_TTS: "true"
+  FREEVOICEREADER_USE_TOR_TUNNEL: "false"
+  FREEVOICEREADER_TTS_VOICE: "en-US-AndrewNeural"
+  FREEVOICEREADER_TTS_TIMEOUT: ${{ secrets.FREEVOICEREADER_TTS_TIMEOUT }}
+  FREEVOICEREADER_TTS_REQUEST_RETRIES: "4"
+  FREEVOICEREADER_TTS_RETRY_BACKOFF_SECONDS: "1.5"
+  FREEVOICEREADER_TTS_COOKIE: ${{ inputs.freevoicereader_cookie != '' && inputs.freevoicereader_cookie || secrets.FREEVOICEREADER_TTS_COOKIE }}
+  FREEVOICEREADER_TTS_COOKIE_TOKEN: ${{ secrets.FREEVOICEREADER_TTS_COOKIE_TOKEN }}
+  FREEVOICEREADER_TTS_COOKIE_NAME: ${{ secrets.FREEVOICEREADER_TTS_COOKIE_NAME }}
+  TTS_GENERATION_RETRIES: "3"
+  TTS_REGENERATION_PASSES: "2"
+  TTS_RETRY_BACKOFF_SECONDS: "1.0"
+  SHORTS_TTS_MAX_WORKERS: "4"
+  TTS_SPEED_FACTOR: "1.2"
+  AUTO_CAPTIONS_FAST_MODE: "true"
+  AUTO_CAPTIONS_MAX_CHUNKS: "240"
+  AUTO_CAPTIONS_USE_AUDIO_TIMESTAMPS: "true"
+  AUTO_CAPTIONS_WHISPER_MODEL: "tiny"
+  AUTO_CAPTIONS_WHISPER_DEVICE: "cpu"
+  AUTO_CAPTIONS_WHISPER_COMPUTE_TYPE: "int8"
+  SHORTS_MEME_EVENT_TARGET_COUNT: "7"
+  SHORTS_MEME_DURATION_MIN: "2.0"
+  SHORTS_MEME_DURATION_MAX: "2.5"
+  SHORTS_SYNTHETIC_STORY_MAX_TOKENS: "5000"
+  SHORTS_CONTENT_PACKAGE_MAX_TOKENS: "4000"
+  SHORTS_MUSIC_DIR: Music
+  SHORTS_GREENSCREEN_DIR: GreenScreenAnimeGirls
+  RENDER_RESERVED_MEMORY_GB: "1.0"
+  RENDER_RESERVED_CPU_CORES: "0"
+  RENDER_MEMORY_PER_WORKER_GB: "0.8"
+
 jobs:
-  generate-shorts:
+  prepare-matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 720
-    env:
-      PYTHONUNBUFFERED: "1"
-      USE_C05_LOCAL_KEYS: "false"
-      SHORTS_RUNTIME_MODE: github_actions
-      SHORTS_VIDEO_ONLY: "true"
-      SHORTS_CREATOR_MODE: video
-      SHORTS_SOURCE_STORY: ${{ inputs.story_text }}
-      ENABLE_YOUTUBE_UPLOAD: "false"
-      ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
-      TOR_PROXY_URL: socks5h://127.0.0.1:9050
-      AI_USE_TOR_TUNNEL: "false"
-      IMAGE_SEARCH_USE_TOR_TUNNEL: "false"
-
-      AI_PROVIDER: nvidia
-      AI_PROVIDER_ORDER: nvidia,g4f,scitely
-      SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
-      SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
-      SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
-      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
-
-      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-      UNSPLASH_API_KEY: ${{ secrets.UNSPLASH_API_KEY || secrets.UNSPLASH_ACCESS_KEY || secrets.UNSPLASH_ACCESS_ID }}
-
-      USE_FREEVOICEREADER_TTS: "true"
-      FREEVOICEREADER_USE_TOR_TUNNEL: "false"
-      FREEVOICEREADER_TTS_VOICE: "en-US-AndrewNeural"
-      FREEVOICEREADER_TTS_TIMEOUT: ${{ secrets.FREEVOICEREADER_TTS_TIMEOUT }}
-      FREEVOICEREADER_TTS_REQUEST_RETRIES: "4"
-      FREEVOICEREADER_TTS_RETRY_BACKOFF_SECONDS: "1.5"
-      FREEVOICEREADER_TTS_COOKIE: ${{ inputs.freevoicereader_cookie != '' && inputs.freevoicereader_cookie || secrets.FREEVOICEREADER_TTS_COOKIE }}
-      FREEVOICEREADER_TTS_COOKIE_TOKEN: ${{ secrets.FREEVOICEREADER_TTS_COOKIE_TOKEN }}
-      FREEVOICEREADER_TTS_COOKIE_NAME: ${{ secrets.FREEVOICEREADER_TTS_COOKIE_NAME }}
-      TTS_GENERATION_RETRIES: "3"
-      TTS_REGENERATION_PASSES: "2"
-      TTS_RETRY_BACKOFF_SECONDS: "1.0"
-      SHORTS_TTS_MAX_WORKERS: "4"
-      TTS_SPEED_FACTOR: "1.2"
-      ENABLE_PARAGRAPH_NARRATION_AUDIO: "false"
-      AUTO_CAPTIONS_FAST_MODE: "true"
-      AUTO_CAPTIONS_MAX_CHUNKS: "18"
-      AUTO_CAPTIONS_USE_AUDIO_TIMESTAMPS: "true"
-      AUTO_CAPTIONS_WHISPER_MODEL: "tiny"
-      AUTO_CAPTIONS_WHISPER_DEVICE: "cpu"
-      AUTO_CAPTIONS_WHISPER_COMPUTE_TYPE: "int8"
-
-      SHORTS_MUSIC_DIR: Music
-      SHORTS_BRAINROT_DIR: AttentionGrabBrainRotVideos
-      SHORTS_GREENSCREEN_DIR: GreenScreenAnimeGirls
-      RENDER_RESERVED_MEMORY_GB: "1.0"
-      RENDER_RESERVED_CPU_CORES: "0"
-      RENDER_MEMORY_PER_WORKER_GB: "0.8"
-
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -104,39 +106,321 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Build short matrix
+        id: matrix
+        run: |
+          matrix_json="$(python -m automation.actions_pipeline prepare-matrix --count "${{ inputs.video_count }}" --story-text "${{ inputs.story_text }}")"
+          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
+          echo "$matrix_json"
+
+  install:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg imagemagick
-
-      - name: Install and start Tor tunnel
-        if: ${{ inputs.use_tor_tunnel }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tor netcat-openbsd
-          if nc -z 127.0.0.1 9050; then
-            echo "Tor SOCKS proxy already available on 127.0.0.1:9050"
-            exit 0
-          fi
-
-          sudo service tor start || sudo systemctl start tor || true
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 9050; then
-              echo "Tor SOCKS proxy is ready"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Tor failed to start or bind 127.0.0.1:9050"
-          sudo service tor status || true
-          exit 1
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Tune render parallelism for runner
+  prepare-content:
+    needs: [prepare-matrix, install]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install and start Tor tunnel
+        if: ${{ inputs.use_tor_tunnel }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor netcat-openbsd
+          sudo service tor start || sudo systemctl start tor || true
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 9050; then exit 0; fi
+            sleep 1
+          done
+          echo "Tor failed to start"
+          exit 1
+
+      - name: Prepare content bundle
+        run: |
+          bundle_dir="workflow_bundles/short_${{ matrix.short_index }}"
+          python -m automation.actions_pipeline prepare-content \
+            --short-index "${{ matrix.short_index }}" \
+            --bundle-dir "$bundle_dir" \
+            --topic-direction "${{ inputs.topic_direction }}" \
+            --story-text "${{ inputs.story_text }}"
+
+      - name: Upload content bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-content-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+          if-no-files-found: error
+
+  generate-audio:
+    needs: [prepare-matrix, install, prepare-content]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download content bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-content-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+
+      - name: Generate master narration and transcript
+        run: |
+          python -m automation.actions_pipeline generate-audio \
+            --short-index "${{ matrix.short_index }}" \
+            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
+
+      - name: Upload audio bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-audio-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+          if-no-files-found: error
+
+  plan-memes:
+    needs: [prepare-matrix, install, generate-audio]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install and start Tor tunnel
+        if: ${{ inputs.use_tor_tunnel }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor netcat-openbsd
+          sudo service tor start || sudo systemctl start tor || true
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 9050; then exit 0; fi
+            sleep 1
+          done
+          echo "Tor failed to start"
+          exit 1
+
+      - name: Download audio bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-audio-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+
+      - name: Plan paired memes
+        run: |
+          python -m automation.actions_pipeline plan-memes \
+            --short-index "${{ matrix.short_index }}" \
+            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
+
+      - name: Upload meme bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-memes-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+          if-no-files-found: error
+
+  fetch-visual-assets:
+    needs: [prepare-matrix, install, generate-audio]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download audio bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-audio-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+
+      - name: Fetch transcript-timed visuals
+        run: |
+          python -m automation.actions_pipeline fetch-visual-assets \
+            --short-index "${{ matrix.short_index }}" \
+            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
+
+      - name: Upload visual bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-visuals-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+          if-no-files-found: error
+
+  generate-thumbnail:
+    needs: [prepare-matrix, install, prepare-content]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install and start Tor tunnel
+        if: ${{ inputs.use_tor_tunnel }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor netcat-openbsd
+          sudo service tor start || sudo systemctl start tor || true
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 9050; then exit 0; fi
+            sleep 1
+          done
+          echo "Tor failed to start"
+          exit 1
+
+      - name: Download content bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-content-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+
+      - name: Generate thumbnail
+        run: |
+          python -m automation.actions_pipeline generate-thumbnail \
+            --short-index "${{ matrix.short_index }}" \
+            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
+
+      - name: Upload thumbnail bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-thumbnail-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+          if-no-files-found: error
+
+  render-base:
+    needs: [prepare-matrix, install, fetch-visual-assets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Tune render parallelism
         run: |
           cores="$(nproc 2>/dev/null || echo 2)"
           if [ -z "$cores" ] || [ "$cores" -lt 1 ]; then
@@ -144,19 +428,152 @@ jobs:
           fi
           echo "RENDER_WORKER_COUNT=$cores" >> "$GITHUB_ENV"
           echo "RENDER_FFMPEG_THREADS=1" >> "$GITHUB_ENV"
-          echo "Render tuning: workers=$cores ffmpeg_threads=1"
 
-      - name: Generate shorts sequentially
+      - name: Download visual bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-visuals-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+
+      - name: Render base video
         run: |
-          python -m automation.workflow_batch_runner \
-            --count "${{ inputs.video_count }}" \
-            --topic-direction "${{ inputs.topic_direction }}" \
-            --creator "video" \
-            --upload-to-youtube "false" \
+          python -m automation.actions_pipeline render-base \
+            --short-index "${{ matrix.short_index }}" \
+            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
+
+      - name: Upload base bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-base-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+          if-no-files-found: error
+
+  finalize-video:
+    needs: [prepare-matrix, install, render-base, plan-memes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download base bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-base-${{ matrix.short_index }}
+          path: workflow_stage/base
+
+      - name: Download meme bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-memes-${{ matrix.short_index }}
+          path: workflow_stage/memes
+
+      - name: Merge bundle branches
+        run: |
+          bundle_dir="workflow_bundles/short_${{ matrix.short_index }}"
+          mkdir -p "$bundle_dir"
+          cp -R workflow_stage/base/. "$bundle_dir/"
+          cp -R workflow_stage/memes/. "$bundle_dir/"
+
+      - name: Finalize video
+        run: |
+          python -m automation.actions_pipeline finalize-video \
+            --short-index "${{ matrix.short_index }}" \
+            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
+
+      - name: Upload final bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-final-${{ matrix.short_index }}
+          path: workflow_bundles/short_${{ matrix.short_index }}
+          if-no-files-found: error
+
+  collect-artifacts:
+    needs: [prepare-matrix, install, finalize-video, generate-thumbnail]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download final bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-final-${{ matrix.short_index }}
+          path: workflow_stage/final
+
+      - name: Download thumbnail bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-thumbnail-${{ matrix.short_index }}
+          path: workflow_stage/thumbnail
+
+      - name: Merge final and thumbnail bundle
+        run: |
+          bundle_dir="workflow_bundles/short_${{ matrix.short_index }}"
+          mkdir -p "$bundle_dir"
+          cp -R workflow_stage/final/. "$bundle_dir/"
+          cp -R workflow_stage/thumbnail/. "$bundle_dir/"
+
+      - name: Collect workflow artifacts
+        run: |
+          python -m automation.actions_pipeline collect-artifacts \
+            --short-index "${{ matrix.short_index }}" \
+            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}" \
             --artifacts-dir "workflow_artifacts"
 
+      - name: Upload collected short artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: collected-short-${{ matrix.short_index }}
+          path: workflow_artifacts
+          if-no-files-found: error
+
+  upload-generated-artifacts:
+    needs: collect-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download collected short artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: collected-short-*
+          path: workflow_artifacts
+          merge-multiple: true
+
       - name: Upload generated artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: generated-shorts-${{ github.run_id }}
@@ -165,13 +582,9 @@ jobs:
 
   upload-to-youtube:
     if: ${{ inputs.upload_to_youtube }}
-    needs: generate-shorts
+    needs: upload-generated-artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    env:
-      PYTHONUNBUFFERED: "1"
-      ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
-      TOR_PROXY_URL: socks5h://127.0.0.1:9050
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -180,28 +593,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install and start Tor tunnel
-        if: ${{ inputs.use_tor_tunnel }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tor netcat-openbsd
-          if nc -z 127.0.0.1 9050; then
-            echo "Tor SOCKS proxy already available on 127.0.0.1:9050"
-            exit 0
-          fi
-
-          sudo service tor start || sudo systemctl start tor || true
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 9050; then
-              echo "Tor SOCKS proxy is ready"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Tor failed to start or bind 127.0.0.1:9050"
-          sudo service tor status || true
-          exit 1
+          cache: "pip"
 
       - name: Install Python dependencies
         run: |

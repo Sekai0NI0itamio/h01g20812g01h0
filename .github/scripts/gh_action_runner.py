@@ -43,6 +43,9 @@ def write_base64_to_file(env_name: str, out_path: Path, binary: bool = False) ->
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--upload', choices=['true', 'false'], default=os.environ.get('ENABLE_YOUTUBE_UPLOAD', 'false'))
+    parser.add_argument('--count', default=os.environ.get('SHORTS_VIDEO_COUNT', '1'))
+    parser.add_argument('--topic-direction', default=os.environ.get('SHORTS_TOPIC_DIRECTION', ''))
+    parser.add_argument('--story-text', default=os.environ.get('SHORTS_SOURCE_STORY', ''))
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -87,17 +90,43 @@ def main():
     os.environ.setdefault('SHORTS_RUNTIME_MODE', 'github_actions')
     os.environ.setdefault('SHORTS_VIDEO_ONLY', 'true')
     os.environ.setdefault('SHORTS_CREATOR_MODE', 'video')
+    os.environ.setdefault('SHORTS_ALLOW_LOCAL_DEV', 'false')
     os.environ.setdefault('USE_C05_LOCAL_KEYS', 'false')
     print(f"ENABLE_YOUTUBE_UPLOAD={args.upload}")
 
-    # 5) Run the main script
+    # 5) Run the staged Actions pipeline
     try:
-        cmd = [sys.executable, str(repo_root / 'main.py')]
+        cmd = [
+            sys.executable,
+            '-m',
+            'automation.actions_pipeline',
+            'run-batch',
+            '--count',
+            str(args.count),
+            '--topic-direction',
+            args.topic_direction,
+            '--story-text',
+            args.story_text,
+            '--artifacts-dir',
+            'workflow_artifacts',
+        ]
         print(f"Running: {' '.join(cmd)}")
         subprocess.check_call(cmd)
     except subprocess.CalledProcessError as e:
-        print(f"Main script failed with exit code {e.returncode}")
+        print(f"Pipeline failed with exit code {e.returncode}")
         raise
+
+    # 6) Optionally upload the produced artifacts
+    if args.upload == 'true':
+        upload_cmd = [
+            sys.executable,
+            '-m',
+            'automation.upload_artifacts_to_youtube',
+            '--artifacts-dir',
+            'workflow_artifacts',
+        ]
+        print(f"Running: {' '.join(upload_cmd)}")
+        subprocess.check_call(upload_cmd)
 
 
 if __name__ == '__main__':

@@ -37,3 +37,16 @@ def should_use_local_c05_keys(default: bool = True) -> bool:
     if is_github_actions_runtime():
         return False
     return default
+
+
+def allow_local_dev_runtime() -> bool:
+    return _normalized_env("SHORTS_ALLOW_LOCAL_DEV") == "true"
+
+
+def require_actions_runtime(feature_name: str = "this command") -> None:
+    if is_github_actions_runtime() or allow_local_dev_runtime():
+        return
+    raise RuntimeError(
+        f"{feature_name} is now GitHub-Actions-first. "
+        "Run it through ActionsRun_with_cookie.py or set SHORTS_ALLOW_LOCAL_DEV=true for developer-only local use."
+    )
