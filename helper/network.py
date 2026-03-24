@@ -5,6 +5,8 @@ from urllib.parse import urlparse
 import httplib2
 import requests
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,28 @@ def get_tor_proxy_url():
 
 def create_requests_session(use_tor=None):
     session = requests.Session()
+
+    pool_connections = max(4, int(os.getenv("REQUESTS_POOL_CONNECTIONS", "32")))
+    pool_maxsize = max(pool_connections, int(os.getenv("REQUESTS_POOL_MAXSIZE", "32")))
+    retry_total = max(0, int(os.getenv("REQUESTS_HTTP_RETRY_TOTAL", "2")))
+    retry_backoff = max(0.0, float(os.getenv("REQUESTS_HTTP_RETRY_BACKOFF_SECONDS", "0.5")))
+    retry = Retry(
+        total=retry_total,
+        connect=retry_total,
+        read=retry_total,
+        status=retry_total,
+        backoff_factor=retry_backoff,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "HEAD", "OPTIONS"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(
+        pool_connections=pool_connections,
+        pool_maxsize=pool_maxsize,
+        max_retries=retry,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
 
     if use_tor is False:
         session.trust_env = False

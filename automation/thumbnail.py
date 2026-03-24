@@ -399,7 +399,8 @@ class ThumbnailGenerator:
             meme_path = fetch_best_image_for_prompt(
                 meme_query,
                 style="mobile phone chat history screenshot, texting app UI, meme-style reaction image",
-                allow_ai_fallback=True,
+                allow_ai_fallback=False,
+                allow_generated_fallback=False,
             )
             if meme_path:
                 logger.info("Fetched thumbnail meme image for query: %s", meme_query)

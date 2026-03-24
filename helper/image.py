@@ -6,6 +6,7 @@ import concurrent.futures
 import logging
 import random
 import re
+import threading
 import time
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -29,6 +30,20 @@ def _env_bool(name, default=False):
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def get_pexels_api_key():
@@ -83,6 +98,8 @@ os.makedirs(temp_dir, exist_ok=True)  # Create temp directory if it doesn't exis
 IMAGE_SEARCH_USE_TOR_TUNNEL = _env_bool("IMAGE_SEARCH_USE_TOR_TUNNEL", False)
 REQUESTS_SESSION = create_requests_session(use_tor=IMAGE_SEARCH_USE_TOR_TUNNEL)
 logger.info("Image search Tor tunnel enabled: %s", IMAGE_SEARCH_USE_TOR_TUNNEL)
+_PROVIDER_RATE_LOCK = threading.Lock()
+_LAST_PROVIDER_REQUEST_TS = {}
 
 
 def _log_proxy_usage(provider_name):
@@ -91,6 +108,30 @@ def _log_proxy_usage(provider_name):
         logger.info("%s requests using proxy: %s", provider_name, proxy)
     else:
         logger.info("%s requests using direct network (Tor disabled)", provider_name)
+
+
+def _throttle_provider(provider_key, default_interval_seconds, env_name):
+    wait_floor = max(0.0, _env_float(env_name, default_interval_seconds))
+    if wait_floor <= 0:
+        return
+
+    with _PROVIDER_RATE_LOCK:
+        now = time.monotonic()
+        last = _LAST_PROVIDER_REQUEST_TS.get(provider_key, 0.0)
+        wait_time = (last + wait_floor) - now
+        if wait_time > 0:
+            time.sleep(wait_time)
+            now = time.monotonic()
+        _LAST_PROVIDER_REQUEST_TS[provider_key] = now
+
+
+def _backoff_after_status(status_code, env_name, default_seconds):
+    if status_code not in {403, 429, 500, 502, 503, 504}:
+        return
+
+    cooldown = max(0.0, _env_float(env_name, default_seconds))
+    if cooldown > 0:
+        time.sleep(cooldown)
 
 
 def _load_g4f():
@@ -429,6 +470,7 @@ def _fetch_image_from_pixabay(query, file_path=None):
     try:
         _log_proxy_usage("Pixabay")
         for candidate in _build_query_candidates(query):
+            _throttle_provider("pixabay_image", 0.8, "PIXABAY_IMAGE_MIN_INTERVAL_SECONDS")
             params = {
                 "key": pixabay_api_key,
                 "q": candidate,
@@ -442,6 +484,11 @@ def _fetch_image_from_pixabay(query, file_path=None):
 
             if response.status_code != 200:
                 logger.warning("Pixabay API error: %s for query '%s'", response.status_code, candidate)
+                _backoff_after_status(
+                    response.status_code,
+                    "PIXABAY_IMAGE_RATE_LIMIT_BACKOFF_SECONDS",
+                    1.2,
+                )
                 continue
 
             hits = (response.json() or {}).get("hits") or []
@@ -480,6 +527,7 @@ def _fetch_image_from_wikimedia_commons(query, file_path=None):
         headers = _browser_headers("https://commons.wikimedia.org/")
 
         for candidate in _build_query_candidates(query):
+            _throttle_provider("wikimedia_image", 0.4, "WIKIMEDIA_IMAGE_MIN_INTERVAL_SECONDS")
             search_response = REQUESTS_SESSION.get(
                 "https://commons.wikimedia.org/w/api.php",
                 params={
@@ -549,6 +597,7 @@ def _fetch_image_from_brave(query, file_path):
         return None
 
     try:
+        _throttle_provider("brave_image", 0.45, "BRAVE_IMAGE_MIN_INTERVAL_SECONDS")
         url = f"https://search.brave.com/images?q={quote_plus(query)}"
         resp = REQUESTS_SESSION.get(url, headers=_browser_headers("https://search.brave.com/"), timeout=15)
         if resp.status_code != 200:
@@ -571,6 +620,7 @@ def _fetch_image_from_ecosia(query, file_path):
         return None
 
     try:
+        _throttle_provider("ecosia_image", 0.45, "ECOSIA_IMAGE_MIN_INTERVAL_SECONDS")
         url = f"https://www.ecosia.org/images?q={quote_plus(query)}"
         resp = REQUESTS_SESSION.get(url, headers=_browser_headers("https://www.ecosia.org/"), timeout=15)
         if resp.status_code != 200:
@@ -603,6 +653,7 @@ def fetch_image_from_duckduckgo(query, file_path=None):
 
     try:
         _log_proxy_usage("DuckDuckGo")
+        _throttle_provider("duckduckgo_image", 0.45, "DUCKDUCKGO_IMAGE_MIN_INTERVAL_SECONDS")
 
         # 1) Get vqd token from initial search page.
         token_resp = REQUESTS_SESSION.get(
@@ -701,9 +752,9 @@ def generate_images_parallel(prompts, style="photorealistic", max_workers=None):
     if not max_workers:
         # Use fewer workers for API calls, especially when Tor is enabled.
         if REQUESTS_SESSION.proxies:
-            max_workers = min(len(prompts), 2)
+            max_workers = min(len(prompts), max(1, _env_int("SHORTS_IMAGE_FETCH_MAX_WORKERS_PROXY", 2)))
         else:
-            max_workers = min(len(prompts), 4)
+            max_workers = min(len(prompts), max(1, _env_int("SHORTS_IMAGE_FETCH_MAX_WORKERS", 3)))
 
     # Image generation is I/O bound (API calls), so use ThreadPoolExecutor
     image_paths = [None] * len(prompts)
@@ -805,13 +856,20 @@ def generate_image_from_prompt(prompt, style="photorealistic", file_path=None, m
     return _generate_image_from_prompt(prompt, style=style, file_path=file_path, model=model)
 
 
-def fetch_best_image_for_prompt(prompt, style="photorealistic", allow_ai_fallback=True):
-    """Fetch the best available visual for a prompt, with g4f fallback when stock images fail or are weak."""
+def fetch_best_image_for_prompt(
+    prompt,
+    style="photorealistic",
+    allow_ai_fallback=True,
+    allow_generated_fallback=True,
+):
+    """Fetch the best available visual for a prompt, optionally restricting fallback to browser/API search results only."""
     if not prompt:
         return None
 
     # Small jitter reduces burst-rate bans from public search endpoints.
-    time.sleep(random.uniform(0.1, 0.35))
+    jitter_min = max(0.0, _env_float("IMAGE_FETCH_PROMPT_JITTER_MIN_SECONDS", 0.25))
+    jitter_max = max(jitter_min, _env_float("IMAGE_FETCH_PROMPT_JITTER_MAX_SECONDS", 0.7))
+    time.sleep(random.uniform(jitter_min, jitter_max))
 
     attempts = [
         ("DuckDuckGo", lambda: fetch_image_from_duckduckgo(prompt)),
@@ -827,16 +885,17 @@ def fetch_best_image_for_prompt(prompt, style="photorealistic", allow_ai_fallbac
         if image_path and _accept_image_candidate(image_path, provider_name):
             return image_path
 
-    if allow_ai_fallback:
+    if allow_ai_fallback and allow_generated_fallback:
         logger.info("Trying g4f AI image fallback for: %s...", prompt[:30])
         image_path = generate_image_from_prompt(prompt, style=style)
         if image_path:
             return image_path
 
-    logger.info("Trying local generated image fallback for: %s...", prompt[:30])
-    image_path = _generate_local_fallback_image(prompt, style=style)
-    if image_path and _accept_image_candidate(image_path, "local"):
-        return image_path
+    if allow_generated_fallback:
+        logger.info("Trying local generated image fallback for: %s...", prompt[:30])
+        image_path = _generate_local_fallback_image(prompt, style=style)
+        if image_path and _accept_image_candidate(image_path, "local"):
+            return image_path
 
     logger.error("All image generation methods failed for prompt: %s...", prompt[:50])
     return None
@@ -864,6 +923,7 @@ def _fetch_image_from_unsplash(query, file_path=None):
     try:
         _log_proxy_usage("Unsplash")
         for candidate in _build_query_candidates(query):
+            _throttle_provider("unsplash_image", 0.85, "UNSPLASH_IMAGE_MIN_INTERVAL_SECONDS")
             params = {
                 "query": candidate,
                 "per_page": 1,
@@ -874,6 +934,11 @@ def _fetch_image_from_unsplash(query, file_path=None):
 
             if response.status_code != 200:
                 logger.warning("Unsplash API error: %s for query '%s'", response.status_code, candidate)
+                _backoff_after_status(
+                    response.status_code,
+                    "UNSPLASH_IMAGE_RATE_LIMIT_BACKOFF_SECONDS",
+                    1.5,
+                )
                 continue
 
             data = response.json()
@@ -918,6 +983,7 @@ def _fetch_image_from_pexels(query, file_path=None):
         headers = {"Authorization": pexels_api_key}
         _log_proxy_usage("Pexels")
         for candidate in _build_query_candidates(query):
+            _throttle_provider("pexels_image", 1.1, "PEXELS_IMAGE_MIN_INTERVAL_SECONDS")
             params = {
                 "query": candidate,
                 "per_page": 1,
@@ -932,6 +998,11 @@ def _fetch_image_from_pexels(query, file_path=None):
 
             if response.status_code != 200:
                 logger.warning("Pexels API error: %s for query '%s'", response.status_code, candidate)
+                _backoff_after_status(
+                    response.status_code,
+                    "PEXELS_IMAGE_RATE_LIMIT_BACKOFF_SECONDS",
+                    2.0,
+                )
                 continue
 
             data = response.json()

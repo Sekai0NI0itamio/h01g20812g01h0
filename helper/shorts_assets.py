@@ -302,6 +302,134 @@ def add_anime_greenscreen_overlay_to_video(
         return video_path
 
 
+def add_timed_meme_overlays_to_video(
+    video_path,
+    script_sections,
+    preset="ultrafast",
+):
+    """
+    Add timed meme images after the anime overlay so memes stay visually above it.
+    The meme image is fit within 1/5 of the short's width and height and centered
+    horizontally near the upper-middle of the frame.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return video_path
+    if not script_sections:
+        return video_path
+
+    try:
+        from moviepy import CompositeVideoClip, ImageClip, VideoFileClip
+    except Exception as exc:
+        logger.error("Timed meme overlay dependencies unavailable: %s", exc)
+        return video_path
+
+    base_clip = None
+    composited = None
+    overlay_clips = []
+    temp_output = video_path.replace(".mp4", "_with_memes.mp4")
+
+    try:
+        base_clip = VideoFileClip(video_path)
+        max_width_ratio = max(0.05, min(0.5, float(os.getenv("SHORTS_MEME_OVERLAY_WIDTH_RATIO", "0.20"))))
+        max_height_ratio = max(0.05, min(0.5, float(os.getenv("SHORTS_MEME_OVERLAY_HEIGHT_RATIO", "0.20"))))
+        vertical_center_ratio = max(0.05, min(0.5, float(os.getenv("SHORTS_MEME_OVERLAY_VERTICAL_CENTER_RATIO", "0.20"))))
+        meme_duration_min = float(os.getenv("SHORTS_MEME_DURATION_MIN", "2.0"))
+        meme_duration_max = float(os.getenv("SHORTS_MEME_DURATION_MAX", "2.5"))
+
+        layers = [base_clip]
+        section_cursor = 0.0
+        added_count = 0
+
+        for section in script_sections:
+            section_duration = max(0.0, float(section.get("duration", 0.0) or 0.0))
+            meme_items = section.get("meme_overlays", []) or []
+
+            for meme in meme_items:
+                meme_path = meme.get("image_path")
+                if not meme_path or not os.path.exists(meme_path):
+                    continue
+
+                meme_offset = max(0.0, float(meme.get("offset_seconds", 0.0) or 0.0))
+                if meme_offset >= section_duration:
+                    continue
+
+                meme_duration = max(
+                    meme_duration_min,
+                    min(meme_duration_max, float(meme.get("duration_seconds", 2.25) or 2.25)),
+                )
+                meme_duration = min(meme_duration, max(0.0, section_duration - meme_offset))
+                if meme_duration <= 0.05:
+                    continue
+
+                image_clip = ImageClip(meme_path)
+                max_width = max(1, int(base_clip.w * max_width_ratio))
+                max_height = max(1, int(base_clip.h * max_height_ratio))
+                scale = min(max_width / max(1, image_clip.w), max_height / max(1, image_clip.h))
+                resized_width = max(1, int(image_clip.w * scale))
+                meme_clip = image_clip.resized(width=resized_width)
+
+                pos_x = max(0, int((base_clip.w - meme_clip.w) / 2))
+                vertical_center = int(base_clip.h * vertical_center_ratio)
+                pos_y = max(0, min(base_clip.h - meme_clip.h, int(vertical_center - (meme_clip.h / 2))))
+
+                meme_clip = (
+                    meme_clip
+                    .with_start(section_cursor + meme_offset)
+                    .with_duration(meme_duration)
+                    .with_position((pos_x, pos_y))
+                )
+
+                overlay_clips.append(meme_clip)
+                layers.append(meme_clip)
+                added_count += 1
+
+            section_cursor += section_duration
+
+        if not added_count:
+            return video_path
+
+        composited = CompositeVideoClip(layers, size=(base_clip.w, base_clip.h)).with_duration(base_clip.duration)
+        if base_clip.audio:
+            composited = composited.with_audio(base_clip.audio)
+
+        composited.write_videofile(
+            temp_output,
+            fps=max(24, int(base_clip.fps or 30)),
+            codec="libx264",
+            audio_codec="aac",
+            preset=preset,
+            logger=None,
+        )
+
+        os.replace(temp_output, video_path)
+        logger.info("Added timed meme overlays (%s items)", added_count)
+        return video_path
+    except Exception as exc:
+        logger.error("Failed to add timed meme overlays: %s", exc)
+        try:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+        except Exception:
+            pass
+        return video_path
+    finally:
+        for clip in overlay_clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        try:
+            if composited:
+                composited.close()
+        except Exception:
+            pass
+        try:
+            if base_clip:
+                base_clip.close()
+        except Exception:
+            pass
+
+
 def _next_caption_chunk_size(remaining, chunk_index=0, fast_mode=False):
     """Choose a caption chunk size that stays within the 2-4 word target."""
     if remaining <= 0:

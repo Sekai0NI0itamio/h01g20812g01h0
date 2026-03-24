@@ -507,7 +507,8 @@ def generate_youtube_short(topic, style="photorealistic", max_duration=25, creat
                 meme_img_path = fetch_best_image_for_prompt(
                     meme_query,
                     style="meme reaction image",
-                    allow_ai_fallback=True,
+                    allow_ai_fallback=False,
+                    allow_generated_fallback=False,
                 )
                 if not meme_img_path:
                     continue

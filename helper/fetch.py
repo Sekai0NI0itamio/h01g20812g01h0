@@ -2,6 +2,7 @@ import os
 import random
 import requests
 import concurrent.futures
+import threading
 from moviepy  import VideoFileClip
 import logging
 import time
@@ -16,7 +17,34 @@ logger = logging.getLogger(__name__)
 # Create temp directories if they don't exist
 video_temp_dir = os.path.join("automation", "temp", "video_downloads")
 os.makedirs(video_temp_dir, exist_ok=True)
-REQUESTS_SESSION = create_requests_session()
+
+
+def _env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+VIDEO_FETCH_USE_TOR_TUNNEL = _env_bool("VIDEO_FETCH_USE_TOR_TUNNEL", False)
+REQUESTS_SESSION = create_requests_session(use_tor=VIDEO_FETCH_USE_TOR_TUNNEL)
+logger.info("Video fetch Tor tunnel enabled: %s", VIDEO_FETCH_USE_TOR_TUNNEL)
+_PROVIDER_RATE_LOCK = threading.Lock()
+_LAST_PROVIDER_REQUEST_TS = {}
 
 
 def _log_proxy_usage(provider_name):
@@ -24,7 +52,31 @@ def _log_proxy_usage(provider_name):
     if proxy:
         logger.info("%s requests using proxy: %s", provider_name, proxy)
     else:
-        logger.warning("%s requests are not using Tor proxy", provider_name)
+        logger.info("%s requests using direct network (Tor disabled)", provider_name)
+
+
+def _throttle_provider(provider_key, default_interval_seconds, env_name):
+    wait_floor = max(0.0, _env_float(env_name, default_interval_seconds))
+    if wait_floor <= 0:
+        return
+
+    with _PROVIDER_RATE_LOCK:
+        now = time.monotonic()
+        last = _LAST_PROVIDER_REQUEST_TS.get(provider_key, 0.0)
+        wait_time = (last + wait_floor) - now
+        if wait_time > 0:
+            time.sleep(wait_time)
+            now = time.monotonic()
+        _LAST_PROVIDER_REQUEST_TS[provider_key] = now
+
+
+def _backoff_after_status(status_code, env_name, default_seconds):
+    if status_code not in {403, 429, 500, 502, 503, 504}:
+        return
+
+    cooldown = max(0.0, _env_float(env_name, default_seconds))
+    if cooldown > 0:
+        time.sleep(cooldown)
 
 # Try to load API keys from environment variables
 try:
@@ -101,9 +153,13 @@ def fetch_videos_parallel(queries, count_per_query=1, min_duration=5):
             logger.error(f"Error fetching videos for query '{query}': {e}")
             return query, []
 
-    # Use ThreadPoolExecutor for I/O-bound operations
+    # Keep the provider burst rate low enough for free-tier APIs.
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(queries), 10)) as executor:
+    max_workers = min(
+        len(queries),
+        max(1, _env_int("SHORTS_VIDEO_FETCH_MAX_WORKERS", 4 if not REQUESTS_SESSION.proxies else 2)),
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_query = {executor.submit(fetch_for_query, query): query for query in queries}
 
         for future in concurrent.futures.as_completed(future_to_query):
@@ -139,12 +195,9 @@ def _fetch_videos(query, count=5, min_duration=5):
 
     # Define APIs to try (with different counts to increase chances)
     apis = [
+        {"name": "pixabay", "func": _fetch_from_pixabay, "count": min(count * 2, 10)},
         {"name": "pexels", "func": _fetch_from_pexels, "count": min(count * 2, 10)},
-        {"name": "pixabay", "func": _fetch_from_pixabay, "count": min(count * 2, 10)}
     ]
-
-    # Shuffle APIs to distribute load
-    random.shuffle(apis)
 
     # Try each API until we get enough videos
     for api in apis:
@@ -165,7 +218,7 @@ def _fetch_videos(query, count=5, min_duration=5):
 
     return videos[:count]
 
-def _download_with_retry(url, output_path, headers=None, max_retries=MAX_RETRIES, chunk_size=8192):
+def _download_with_retry(url, output_path, headers=None, max_retries=MAX_RETRIES, chunk_size=8192, provider_key="video_download"):
     """
     Download a file with retry logic
 
@@ -181,6 +234,7 @@ def _download_with_retry(url, output_path, headers=None, max_retries=MAX_RETRIES
     """
     for attempt in range(max_retries):
         try:
+            _throttle_provider(provider_key, 0.2, "VIDEO_DOWNLOAD_MIN_INTERVAL_SECONDS")
             with REQUESTS_SESSION.get(url, headers=headers, stream=True, timeout=30) as r:
                 r.raise_for_status()
                 with open(output_path, 'wb') as f:
@@ -223,6 +277,7 @@ def _fetch_from_pixabay(query, count, min_duration):
         search_candidates = _build_query_candidates(query)
 
         for candidate in search_candidates:
+            _throttle_provider("pixabay_video_api", 0.8, "PIXABAY_VIDEO_SEARCH_MIN_INTERVAL_SECONDS")
             params = {
                 "key": pixabay_api_key,
                 "q": candidate,
@@ -233,6 +288,11 @@ def _fetch_from_pixabay(query, count, min_duration):
             response = REQUESTS_SESSION.get("https://pixabay.com/api/videos/", params=params, timeout=20)
             if response.status_code != 200:
                 logger.warning("Pixabay API returned status code %s for query '%s'", response.status_code, candidate)
+                _backoff_after_status(
+                    response.status_code,
+                    "PIXABAY_VIDEO_RATE_LIMIT_BACKOFF_SECONDS",
+                    1.5,
+                )
                 continue
 
             data = response.json()
@@ -272,7 +332,7 @@ def _fetch_from_pixabay(query, count, min_duration):
                                 os.remove(video_path)
 
                     # Download the video with retry
-                    if _download_with_retry(video_url, video_path):
+                    if _download_with_retry(video_url, video_path, provider_key="pixabay_video_download"):
                         # Check duration
                         try:
                             clip = VideoFileClip(video_path)
@@ -293,7 +353,11 @@ def _fetch_from_pixabay(query, count, min_duration):
                     return None
 
             # Use ThreadPoolExecutor to download videos in parallel
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(selected_videos), 5)) as executor:
+            download_workers = min(
+                len(selected_videos),
+                max(1, _env_int("SHORTS_STOCK_DOWNLOAD_MAX_WORKERS", 2)),
+            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=download_workers) as executor:
                 # Submit all download tasks and collect futures
                 future_to_video = {executor.submit(download_and_check_video, video): video for video in selected_videos}
 
@@ -336,6 +400,7 @@ def _fetch_from_pexels(query, count=5, min_duration=15):
         search_candidates = _build_query_candidates(query)
 
         for candidate in search_candidates:
+            _throttle_provider("pexels_video_api", 1.25, "PEXELS_VIDEO_SEARCH_MIN_INTERVAL_SECONDS")
             params = {
                 "query": candidate,
                 "per_page": 20,
@@ -349,6 +414,11 @@ def _fetch_from_pexels(query, count=5, min_duration=15):
             )
             if response.status_code != 200:
                 logger.warning("Pexels API returned status code %s for query '%s'", response.status_code, candidate)
+                _backoff_after_status(
+                    response.status_code,
+                    "PEXELS_VIDEO_RATE_LIMIT_BACKOFF_SECONDS",
+                    3.0,
+                )
                 continue
 
             data = response.json()
@@ -402,7 +472,7 @@ def _fetch_from_pexels(query, count=5, min_duration=15):
                                 os.remove(video_path)
 
                     # Download the video with retry
-                    if _download_with_retry(video_url, video_path, headers=headers):
+                    if _download_with_retry(video_url, video_path, headers=headers, provider_key="pexels_video_download"):
                         # Check duration
                         try:
                             clip = VideoFileClip(video_path)
@@ -423,7 +493,11 @@ def _fetch_from_pexels(query, count=5, min_duration=15):
                     return None
 
             # Use ThreadPoolExecutor to download videos in parallel
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(selected_videos), 5)) as executor:
+            download_workers = min(
+                len(selected_videos),
+                max(1, _env_int("SHORTS_STOCK_DOWNLOAD_MAX_WORKERS", 2)),
+            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=download_workers) as executor:
                 # Submit all download tasks
                 future_to_video = {executor.submit(download_and_check_video, video): video for video in selected_videos}
 

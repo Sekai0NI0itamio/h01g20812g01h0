@@ -29,6 +29,7 @@ from helper.shorts_assets import (
     add_dynamic_auto_captions_to_video,
     add_anime_greenscreen_overlay_to_video,
     add_background_music_to_video,
+    add_timed_meme_overlays_to_video,
     build_brainrot_overlay_clip,
     get_default_font_path,
     pick_random_background_music,
@@ -490,33 +491,6 @@ class YTShortsCreator_I:
                         logger.error(f"Error building brainrot overlay for section {i}: {e}")
                 brainrot_elapsed += section_duration
 
-                # Add timed meme image overlays for this section (if planned).
-                section_meta = script_sections[i] if i < len(script_sections) else {}
-                meme_items = section_meta.get('meme_overlays', []) or []
-                for meme in meme_items:
-                    try:
-                        meme_path = meme.get('image_path')
-                        if not meme_path or not os.path.exists(meme_path):
-                            continue
-
-                        meme_offset = max(0.0, float(meme.get('offset_seconds', 0.0) or 0.0))
-                        meme_duration_min = float(os.getenv("SHORTS_MEME_DURATION_MIN", "2.0"))
-                        meme_duration_max = float(os.getenv("SHORTS_MEME_DURATION_MAX", "2.5"))
-                        meme_duration = max(
-                            meme_duration_min,
-                            min(meme_duration_max, float(meme.get('duration_seconds', 2.25) or 2.25)),
-                        )
-                        if meme_offset >= section_duration:
-                            continue
-                        meme_duration = min(meme_duration, section_duration - meme_offset)
-
-                        meme_clip = ImageClip(meme_path).resized(width=int(self.resolution[0] * 0.66))
-                        meme_clip = meme_clip.with_start(meme_offset).with_duration(meme_duration)
-                        meme_clip = meme_clip.with_position(("center", int(self.resolution[1] * 0.34)))
-                        visual_layers.append(meme_clip)
-                    except Exception as meme_err:
-                        logger.warning(f"Failed to add meme overlay for section {i}: {meme_err}")
-
                 visual_base = CompositeVideoClip(visual_layers, size=self.resolution).with_duration(section_duration)
                 
                 # Add text clip after the visual stack so subtitles stay on top
@@ -645,6 +619,14 @@ class YTShortsCreator_I:
                 output_path = add_anime_greenscreen_overlay_to_video(
                     output_path,
                     selected_overlay_path=selected_overlay,
+                    preset="ultrafast",
+                )
+
+            # Add meme overlays after the anime pass so memes stay above the dancer.
+            if output_path and os.path.exists(output_path):
+                output_path = add_timed_meme_overlays_to_video(
+                    output_path,
+                    script_sections=script_sections,
                     preset="ultrafast",
                 )
 
