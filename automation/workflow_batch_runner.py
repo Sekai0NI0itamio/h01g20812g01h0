@@ -72,7 +72,7 @@ def generate_auto_topic(direction: str, index: int, used_topics: set[str]) -> st
         ScitelyAPIError,
         create_chat_completion,
         get_default_chat_provider,
-        get_scitely_model,
+        get_preferred_chat_model,
     )
 
     direction_text = direction.strip() if direction else ""
@@ -100,7 +100,7 @@ def generate_auto_topic(direction: str, index: int, used_topics: set[str]) -> st
         try:
             response = create_chat_completion(
                 messages=[{"role": "user", "content": prompt}],
-                model=get_scitely_model(),
+                model=get_preferred_chat_model(provider),
                 max_tokens=64,
                 temperature=0.95,
                 provider=provider,
@@ -111,12 +111,6 @@ def generate_auto_topic(direction: str, index: int, used_topics: set[str]) -> st
             logger.warning("Topic generation returned empty or duplicate result for item %s on attempt %s/3", index, attempt + 1)
         except (ScitelyAPIError, ValueError, RuntimeError) as exc:
             logger.warning("Topic generation failed for item %s on attempt %s/3: %s", index, attempt + 1, exc)
-            if attempt < 2:
-                continue
-            if provider != "nvidia":
-                provider = "nvidia"
-                logger.info("Switching topic generation to NVIDIA after repeated failures")
-                continue
 
     fallback_base = direction_text or "Artificial Intelligence"
     fallback_topic = f"{fallback_base} trend #{index}"

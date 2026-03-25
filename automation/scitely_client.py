@@ -24,11 +24,11 @@ DEFAULT_SCITELY_BASE_URL = "https://api.scitely.com/v1"
 DEFAULT_SCITELY_MODEL = "deepseek-v3.2"
 DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
-DEFAULT_G4F_MODEL = "gemini-2.5-pro"
+DEFAULT_G4F_MODEL = "deepseek-v3.2"
 DEFAULT_G4F_MODEL_FALLBACKS = (
+    "deepseek-v3-0324",
     "gpt-4.1",
     "gpt-4o",
-    "deepseek-v3-0324",
     "gpt-4o-mini",
 )
 
@@ -123,14 +123,14 @@ def _get_provider_order() -> List[str]:
             return order
 
     default_provider = get_default_chat_provider()
-    fallback_priority = [default_provider, "g4f", "nvidia", "scitely"]
+    fallback_priority = [default_provider, "g4f", "scitely"]
 
     order = []
     for candidate in fallback_priority:
         if candidate in {"scitely", "nvidia", "g4f"} and candidate not in order:
             order.append(candidate)
 
-    return order or ["g4f", "nvidia", "scitely"]
+    return order or ["g4f", "scitely"]
 
 
 def _extract_completion_text(response):

@@ -60,8 +60,10 @@ env:
   AI_USE_TOR_TUNNEL: "false"
   IMAGE_SEARCH_USE_TOR_TUNNEL: "false"
   VIDEO_FETCH_USE_TOR_TUNNEL: "false"
-  AI_PROVIDER: nvidia
-  AI_PROVIDER_ORDER: nvidia,g4f,scitely
+  AI_PROVIDER: g4f
+  AI_PROVIDER_ORDER: g4f,scitely
+  G4F_MODEL: deepseek-v3.2
+  G4F_MODEL_FALLBACKS: deepseek-v3-0324
   SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
   SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
   SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
