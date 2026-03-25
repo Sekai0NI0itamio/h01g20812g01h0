@@ -247,6 +247,71 @@ class AudioHelper:
             logger.error(f"Error combining audio clips: {e}")
             return None
 
+    def create_silence_audio(self, duration, filename=None):
+        """Create a silent wav file for brief narration pauses."""
+        duration = max(0.0, float(duration or 0.0))
+        if duration <= 0.0:
+            return None
+
+        if not filename:
+            filename = os.path.join(self.temp_dir, f"silence_{int(time.time() * 1000)}.wav")
+
+        try:
+            cmd = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi",
+                "-i", "anullsrc=r=44100:cl=mono",
+                "-t", f"{duration:.3f}",
+                filename,
+            ]
+            subprocess.run(cmd, check=True)
+            if self._is_valid_audio_file(filename):
+                return filename
+        except Exception as exc:
+            logger.error("Failed to create silence audio %.3fs: %s", duration, exc)
+        return None
+
+    def combine_audio_clips_with_pauses(self, audio_files, pause_after_seconds=None, output_filename=None):
+        """
+        Combine narration clips into one continuous file, inserting short silent
+        pauses between segments.
+        """
+        pause_after_seconds = list(pause_after_seconds or [])
+        sequence_paths = []
+        temp_silence_files = []
+
+        try:
+            for idx, audio_path in enumerate(audio_files or []):
+                if not self._is_valid_audio_file(audio_path):
+                    continue
+                sequence_paths.append(audio_path)
+
+                pause_duration = 0.0
+                if idx < len(pause_after_seconds):
+                    try:
+                        pause_duration = max(0.0, float(pause_after_seconds[idx] or 0.0))
+                    except Exception:
+                        pause_duration = 0.0
+
+                if pause_duration > 0.0 and idx < len(audio_files) - 1:
+                    silence_path = self.create_silence_audio(pause_duration)
+                    if silence_path and self._is_valid_audio_file(silence_path):
+                        temp_silence_files.append(silence_path)
+                        sequence_paths.append(silence_path)
+
+            if not sequence_paths:
+                logger.warning("No audio clips were available to combine with pauses")
+                return None
+
+            return self.combine_audio_clips(sequence_paths, output_filename=output_filename)
+        finally:
+            for silence_path in temp_silence_files:
+                try:
+                    if silence_path and os.path.exists(silence_path):
+                        os.remove(silence_path)
+                except Exception:
+                    pass
+
     @measure_time
     def process_audio_for_script(self, script_sections, voice_style=None, max_workers=None):
         """

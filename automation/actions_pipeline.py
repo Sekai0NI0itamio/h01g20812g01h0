@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
@@ -104,6 +105,16 @@ def _load_content(bundle_dir: Path) -> dict:
     return _load_json(_content_path(bundle_dir))
 
 
+def _load_script_text(bundle_dir: Path, *names: str) -> str:
+    for name in names:
+        candidate = _bundle_file(bundle_dir, name)
+        if candidate.exists():
+            text = candidate.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+    return ""
+
+
 def _sound_effect_files() -> list[str]:
     if not SOUND_EFFECTS_DIR.is_dir():
         return []
@@ -166,8 +177,26 @@ def prepare_content_stage(bundle_dir: Path, short_index: int, topic_direction: s
         }
     )
 
+    raw_paragraph = " ".join(str(content_payload.get("raw_paragraph") or paragraph).split()).strip()
+    direct_paragraph = " ".join(str(content_payload.get("direct_paragraph") or paragraph).split()).strip()
+    final_paragraph = " ".join(str(content_payload.get("final_paragraph") or paragraph).split()).strip() or paragraph
+    content_payload["raw_paragraph"] = raw_paragraph
+    content_payload["direct_paragraph"] = direct_paragraph
+    content_payload["final_paragraph"] = final_paragraph
+    content_payload["paragraph"] = final_paragraph
+    content_payload["script"] = final_paragraph
+    content_payload["script_files"] = {
+        "raw": "script_raw.txt",
+        "direct": "script_direct.txt",
+        "final": "script_final.txt",
+        "canonical": "script.txt",
+    }
+
     _save_json(_content_path(bundle_dir), content_payload)
-    _bundle_file(bundle_dir, "script.txt").write_text(paragraph, encoding="utf-8")
+    _bundle_file(bundle_dir, "script_raw.txt").write_text(raw_paragraph, encoding="utf-8")
+    _bundle_file(bundle_dir, "script_direct.txt").write_text(direct_paragraph, encoding="utf-8")
+    _bundle_file(bundle_dir, "script_final.txt").write_text(final_paragraph, encoding="utf-8")
+    _bundle_file(bundle_dir, "script.txt").write_text(final_paragraph, encoding="utf-8")
     logger.info("[%s] Saved long-form content package: %s", short_index, title)
     return bundle_dir
 
@@ -220,20 +249,150 @@ def _build_transcript_sections(words: list[dict], paragraph: str, audio_duration
     return _fallback_sections_from_paragraph(paragraph, audio_duration)
 
 
+def _segment_word_count(text: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9']+", str(text or "")))
+
+
+def _build_sections_from_narration_segments(
+    words: list[dict],
+    segments: list[dict],
+    segment_timeline: list[dict],
+    paragraph: str,
+    audio_duration: float,
+) -> list[dict]:
+    if not segments or not segment_timeline:
+        return _build_transcript_sections(words, paragraph, audio_duration)
+
+    if not words:
+        fallback_sections = []
+        for idx, item in enumerate(segment_timeline):
+            text = " ".join(str(item.get("text") or "").split()).strip()
+            if not text:
+                continue
+            start_time = float(item.get("start_time", 0.0) or 0.0)
+            end_time = max(start_time, float(item.get("end_time", start_time) or start_time))
+            fallback_sections.append(
+                {
+                    "id": f"segment_section_{idx}",
+                    "text": text,
+                    "duration": max(0.12, end_time - start_time),
+                    "voice_style": "male",
+                    "speaker": "boy",
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "word_timestamps": [],
+                    "pause_after_seconds": float(item.get("pause_after_seconds", 0.0) or 0.0),
+                }
+            )
+        return fallback_sections or _fallback_sections_from_paragraph(paragraph, audio_duration)
+
+    normalized_words = []
+    for word in words:
+        token = str(word.get("word", "") or "").strip()
+        if not token:
+            continue
+        start = float(word.get("start", 0.0) or 0.0)
+        end = max(start, float(word.get("end", start) or start))
+        normalized_words.append({"word": token, "start": start, "end": end})
+
+    if not normalized_words:
+        return _fallback_sections_from_paragraph(paragraph, audio_duration)
+
+    target_counts = [max(1, _segment_word_count(item.get("text", ""))) for item in segments]
+    sections = []
+    cursor = 0
+    remaining_targets = sum(target_counts)
+
+    for idx, item in enumerate(segment_timeline):
+        if cursor >= len(normalized_words):
+            break
+
+        remaining_words = len(normalized_words) - cursor
+        if idx == len(segment_timeline) - 1:
+            take = remaining_words
+        else:
+            target = target_counts[idx] if idx < len(target_counts) else max(1, _segment_word_count(item.get("text", "")))
+            proportional = int(round(remaining_words * (target / max(1, remaining_targets))))
+            min_remaining = max(1, len(segment_timeline) - idx - 1)
+            take = max(1, min(remaining_words - min_remaining, proportional if proportional > 0 else target))
+
+        group = normalized_words[cursor:cursor + take]
+        cursor += take
+        remaining_targets -= target_counts[idx] if idx < len(target_counts) else 0
+        if not group:
+            continue
+
+        start_time = float(group[0].get("start", 0.0) or 0.0)
+        end_time = max(start_time, float(group[-1].get("end", start_time) or start_time))
+        text = " ".join(str(word.get("word", "")).strip() for word in group).strip()
+        if not text:
+            text = " ".join(str(item.get("text") or "").split()).strip()
+        sections.append(
+            {
+                "id": f"segment_section_{idx}",
+                "text": text,
+                "duration": max(0.12, end_time - start_time),
+                "voice_style": "male",
+                "speaker": "boy",
+                "start_time": start_time,
+                "end_time": end_time,
+                "word_timestamps": group,
+                "pause_after_seconds": float(item.get("pause_after_seconds", 0.0) or 0.0),
+            }
+        )
+
+    if sections:
+        logger.info("Built %s timed script sections from narration segments", len(sections))
+        return sections
+    return _build_transcript_sections(words, paragraph, audio_duration)
+
+
 def generate_audio_stage(bundle_dir: Path, short_index: int) -> Path:
+    from automation.content_generator import segment_paragraph_for_tts
     from helper.audio import AudioHelper
     from helper.shorts_assets import build_transcript_text, transcribe_audio_to_word_timestamps
 
     require_actions_runtime("generate-audio")
     bundle_dir = _stage_bundle_dir(bundle_dir)
     content = _load_content(bundle_dir)
-    paragraph = " ".join(str(content.get("paragraph") or content.get("script") or "").split()).strip()
+    paragraph = _load_script_text(bundle_dir, "script_final.txt", "script.txt")
+    if not paragraph:
+        paragraph = " ".join(str(content.get("paragraph") or content.get("script") or "").split()).strip()
     if not paragraph:
         raise RuntimeError("Missing paragraph text for audio generation")
 
     audio_helper = AudioHelper(str(bundle_dir / "audio"))
+    narration_segments = segment_paragraph_for_tts(paragraph)
+    if not narration_segments:
+        narration_segments = [{"index": 0, "text": paragraph, "pause_after_seconds": 0.0}]
+
+    segment_sections = []
+    for idx, segment in enumerate(narration_segments):
+        segment_sections.append(
+            {
+                "id": f"narration_segment_{idx:03d}",
+                "text": str(segment.get("text") or "").strip(),
+                "voice_style": "male",
+                "pause_after_seconds": float(segment.get("pause_after_seconds", 0.0) or 0.0),
+            }
+        )
+
+    segment_audio_data = audio_helper.process_audio_for_script(segment_sections, voice_style="male")
+    segment_audio_data = audio_helper.ensure_audio_data_complete(segment_sections, segment_audio_data, voice_style="male")
+    segment_audio_files = [item.get("path") if isinstance(item, dict) else None for item in segment_audio_data]
+
     narration_path = _bundle_file(bundle_dir, "master_narration.wav")
-    created_audio = audio_helper.create_tts_audio(paragraph, filename=str(narration_path))
+    pause_after_seconds = [float(segment.get("pause_after_seconds", 0.0) or 0.0) for segment in narration_segments]
+    created_audio = audio_helper.combine_audio_clips_with_pauses(
+        segment_audio_files,
+        pause_after_seconds=pause_after_seconds,
+        output_filename=str(narration_path),
+    )
+    if not created_audio or not os.path.exists(created_audio):
+        logger.warning("[%s] Segmented TTS combine failed; falling back to single-pass narration", short_index)
+        created_audio = audio_helper.create_tts_audio(paragraph, filename=str(narration_path))
+        narration_segments = [{"index": 0, "text": paragraph, "pause_after_seconds": 0.0}]
+        segment_audio_data = []
     if not created_audio or not os.path.exists(created_audio):
         raise RuntimeError("Failed to generate master narration audio")
 
@@ -247,10 +406,45 @@ def generate_audio_stage(bundle_dir: Path, short_index: int) -> Path:
     except Exception:
         audio_duration = 0.0
 
-    sections = _build_transcript_sections(words, paragraph, audio_duration)
+    segment_timeline = []
+    cursor = 0.0
+    for idx, segment in enumerate(narration_segments):
+        item = segment_audio_data[idx] if idx < len(segment_audio_data) else None
+        duration = 0.0
+        audio_path = None
+        if isinstance(item, dict):
+            duration = float(item.get("duration", 0.0) or 0.0)
+            audio_path = item.get("path")
+        if duration <= 0.0 and idx == 0 and len(narration_segments) == 1:
+            duration = audio_duration
+
+        start_time = cursor
+        end_time = start_time + max(0.0, duration)
+        pause_after = float(segment.get("pause_after_seconds", 0.0) or 0.0)
+        segment_timeline.append(
+            {
+                "index": idx,
+                "text": str(segment.get("text") or "").strip(),
+                "pause_after_seconds": pause_after,
+                "audio_duration_seconds": duration,
+                "start_time": start_time,
+                "end_time": end_time,
+                "audio_path": _relpath(Path(audio_path), bundle_dir) if audio_path else "",
+            }
+        )
+        cursor = end_time + pause_after
+
+    sections = _build_sections_from_narration_segments(
+        words,
+        narration_segments,
+        segment_timeline,
+        paragraph,
+        audio_duration,
+    )
     if not sections:
         raise RuntimeError("Failed to derive transcript sections from narration audio")
 
+    _save_json(_bundle_file(bundle_dir, "narration_segments.json"), segment_timeline)
     _save_json(_bundle_file(bundle_dir, "transcript_words.json"), words)
     _save_json(_bundle_file(bundle_dir, "transcript_sections.json"), sections)
     _save_json(
@@ -260,10 +454,16 @@ def generate_audio_stage(bundle_dir: Path, short_index: int) -> Path:
             "master_narration_path": "master_narration.wav",
             "transcript_text": transcript_text,
             "audio_duration_seconds": audio_duration,
+            "segment_count": len(segment_timeline),
             "section_count": len(sections),
         },
     )
-    logger.info("[%s] Generated master narration and %s transcript sections", short_index, len(sections))
+    logger.info(
+        "[%s] Generated segmented master narration (%s segments) and %s transcript sections",
+        short_index,
+        len(segment_timeline),
+        len(sections),
+    )
     return bundle_dir
 
 
@@ -732,6 +932,23 @@ def collect_artifacts_stage(bundle_dir: Path, short_index: int, artifacts_dir: P
     script_path = _bundle_file(bundle_dir, "script.txt")
     if script_path.exists():
         shutil.copy2(script_path, item_dir / "script.txt")
+    for extra_script in ("script_raw.txt", "script_direct.txt", "script_final.txt", "narration_segments.json"):
+        extra_path = _bundle_file(bundle_dir, extra_script)
+        if extra_path.exists():
+            shutil.copy2(extra_path, item_dir / extra_script)
+    for extra_bundle_file in (
+        "content_package.json",
+        "master_narration.wav",
+        "transcript_words.json",
+        "transcript_sections.json",
+        "meme_events.json",
+        "visual_manifest.json",
+        "base_video.mp4",
+        "narration_metadata.json",
+    ):
+        extra_path = _bundle_file(bundle_dir, extra_bundle_file)
+        if extra_path.exists():
+            shutil.copy2(extra_path, item_dir / extra_bundle_file)
 
     metadata = {
         "index": short_index,
@@ -757,10 +974,22 @@ def run_single_short_pipeline(bundle_dir: Path, short_index: int, topic_directio
 
     prepare_content_stage(bundle_dir, short_index, topic_direction=topic_direction, story_text=story_text)
     generate_audio_stage(bundle_dir, short_index)
-    plan_memes_stage(bundle_dir, short_index)
-    fetch_visual_assets_stage(bundle_dir, short_index)
+    stage_jobs = [
+        ("plan-memes", plan_memes_stage),
+        ("fetch-visual-assets", fetch_visual_assets_stage),
+        ("generate-thumbnail", generate_thumbnail_stage),
+    ]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(stage_jobs)) as executor:
+        future_map = {
+            executor.submit(stage_fn, bundle_dir, short_index): stage_name
+            for stage_name, stage_fn in stage_jobs
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            stage_name = future_map[future]
+            future.result()
+            logger.info("[%s] Completed parallel stage: %s", short_index, stage_name)
+
     render_base_stage(bundle_dir, short_index)
-    generate_thumbnail_stage(bundle_dir, short_index)
     finalize_video_stage(bundle_dir, short_index)
     return collect_artifacts_stage(bundle_dir, short_index, artifacts_dir)
 
@@ -790,6 +1019,31 @@ def run_batch_pipeline(count: int, topic_direction: str = "", story_text: str = 
         )
 
     logger.info("Completed Actions pipeline batch. Artifacts directory: %s", artifacts_root)
+    return artifacts_root
+
+
+def run_actions_job(
+    count: int,
+    topic_direction: str = "",
+    story_text: str = "",
+    artifacts_dir: str | Path = DEFAULT_ARTIFACTS_DIR,
+    upload_to_youtube: bool = False,
+    youtube_privacy: str = "public",
+) -> Path:
+    artifacts_root = run_batch_pipeline(
+        count=count,
+        topic_direction=topic_direction,
+        story_text=story_text,
+        artifacts_dir=artifacts_dir,
+    )
+
+    if upload_to_youtube:
+        from automation.upload_artifacts_to_youtube import upload_artifacts
+
+        uploaded = upload_artifacts(Path(artifacts_root), privacy=youtube_privacy)
+        if uploaded <= 0:
+            raise RuntimeError("YouTube upload was requested but no videos were uploaded")
+
     return artifacts_root
 
 
@@ -827,6 +1081,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--topic-direction", default="")
     run_parser.add_argument("--story-text", default="")
     run_parser.add_argument("--artifacts-dir", default=str(DEFAULT_ARTIFACTS_DIR))
+
+    actions_job_parser = subparsers.add_parser("run-actions-job", help="Run the full Actions pipeline in one installed environment")
+    actions_job_parser.add_argument("--count", type=int, default=1)
+    actions_job_parser.add_argument("--topic-direction", default="")
+    actions_job_parser.add_argument("--story-text", default="")
+    actions_job_parser.add_argument("--artifacts-dir", default=str(DEFAULT_ARTIFACTS_DIR))
+    actions_job_parser.add_argument("--upload-to-youtube", default="false")
+    actions_job_parser.add_argument("--youtube-privacy", default="public", choices=["public", "private", "unlisted"])
 
     return parser
 
@@ -869,6 +1131,16 @@ def main(argv=None) -> int:
             topic_direction=args.topic_direction,
             story_text=args.story_text,
             artifacts_dir=args.artifacts_dir,
+        )
+        return 0
+    if args.command == "run-actions-job":
+        run_actions_job(
+            count=args.count,
+            topic_direction=args.topic_direction,
+            story_text=args.story_text,
+            artifacts_dir=args.artifacts_dir,
+            upload_to_youtube=_coerce_bool(args.upload_to_youtube),
+            youtube_privacy=args.youtube_privacy,
         )
         return 0
 

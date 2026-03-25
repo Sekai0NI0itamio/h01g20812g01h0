@@ -37,11 +37,8 @@ def _build_title_description(item_dir: Path):
     return title, description
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
-    args = parse_args()
-
-    artifacts_root = Path(args.artifacts_dir)
+def upload_artifacts(artifacts_dir: str | Path, privacy: str = "public") -> int:
+    artifacts_root = Path(artifacts_dir)
     if not artifacts_root.exists():
         raise FileNotFoundError(f"Artifacts directory not found: {artifacts_root}")
 
@@ -69,7 +66,7 @@ def main():
                 description=description,
                 tags=["shorts", "storytime", "ai"],
                 thumbnail_path=str(thumbnail_path) if thumbnail_path.exists() else None,
-                privacy=args.privacy,
+                privacy=privacy,
             )
             uploaded += 1
             logger.info("Uploaded %s", item.name)
@@ -77,6 +74,13 @@ def main():
             logger.error("Failed to upload %s: %s", item.name, exc)
 
     logger.info("Upload complete: %s/%s uploaded", uploaded, len(item_dirs))
+    return uploaded
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+    args = parse_args()
+    uploaded = upload_artifacts(args.artifacts_dir, privacy=args.privacy)
     return 0 if uploaded > 0 else 1
 
 

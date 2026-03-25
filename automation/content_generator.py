@@ -124,6 +124,22 @@ def _get_content_package_max_tokens():
     return max(1500, _env_int("SHORTS_CONTENT_PACKAGE_MAX_TOKENS", 5000))
 
 
+def _get_direct_rewrite_max_tokens():
+    return max(1200, _env_int("SHORTS_DIRECT_REWRITE_MAX_TOKENS", 2600))
+
+
+def _get_shorten_rewrite_max_tokens():
+    return max(1000, _env_int("SHORTS_SHORTEN_REWRITE_MAX_TOKENS", 2200))
+
+
+def _get_metadata_refresh_max_tokens():
+    return max(800, _env_int("SHORTS_METADATA_REFRESH_MAX_TOKENS", 1800))
+
+
+def _get_segmentation_max_tokens():
+    return max(600, _env_int("SHORTS_TTS_SEGMENTATION_MAX_TOKENS", 1800))
+
+
 def _get_default_meme_event_count():
     configured = _env_int("SHORTS_MEME_EVENT_TARGET_COUNT", 7)
     return max(5, min(10, configured))
@@ -433,6 +449,216 @@ def _normalize_paragraph_narration_style(paragraph_text):
         text += f" {cta}."
 
     return text
+
+
+def _clean_plain_text_response(text):
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^```(?:json|text)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _derive_script_beats_from_paragraph(paragraph_text, min_lines=8, max_lines=16):
+    text = " ".join(str(paragraph_text or "").split()).strip()
+    if not text:
+        return ""
+
+    sentence_parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    beat_lines = []
+    for part in sentence_parts:
+        cleaned = part.strip(" ")
+        if not cleaned:
+            continue
+        words = cleaned.split()
+        if len(words) <= 12:
+            beat_lines.append(cleaned)
+            continue
+
+        cursor = 0
+        while cursor < len(words):
+            remaining = len(words) - cursor
+            take = max(5, min(12, int(math.ceil(remaining / max(1, math.ceil(remaining / 10))))))
+            chunk = " ".join(words[cursor:cursor + take]).strip()
+            if chunk:
+                beat_lines.append(chunk)
+            cursor += take
+
+    if len(beat_lines) < min_lines:
+        words = text.split()
+        beat_lines = []
+        cursor = 0
+        chunk_size = max(5, min(11, int(math.ceil(len(words) / max(1, min_lines)))))
+        while cursor < len(words):
+            beat_lines.append(" ".join(words[cursor:cursor + chunk_size]).strip())
+            cursor += chunk_size
+
+    if len(beat_lines) > max_lines:
+        merged = []
+        cursor = 0
+        remaining = len(beat_lines)
+        remaining_groups = max_lines
+        while cursor < len(beat_lines):
+            take = int(math.ceil(remaining / max(1, remaining_groups)))
+            merged.append(" ".join(beat_lines[cursor:cursor + take]).strip())
+            cursor += take
+            remaining = len(beat_lines) - cursor
+            remaining_groups -= 1
+        beat_lines = merged
+
+    return "\n".join(line for line in beat_lines if line).strip()
+
+
+def _rewrite_paragraph_direct_speech(paragraph_text, model):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You rewrite narration so it sounds like a real person talking directly. "
+                "Remove poetic, literary, overwritten, and overly descriptive wording. "
+                "Keep the same events, emotional beats, and order. "
+                "Use plain spoken language, short clear sentences, and keep it as one paragraph. "
+                "Return only the rewritten paragraph."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "This script sounds too poetic and uses too many literary or descriptive words. "
+                "Rewrite it in direct plain spoken text and show the full script again.\n\n"
+                f"{paragraph_text}"
+            ),
+        },
+    ]
+    rewritten = _create_text_completion(
+        messages=messages,
+        model=model,
+        max_tokens=_get_direct_rewrite_max_tokens(),
+        temperature=0.45,
+    )
+    return _normalize_paragraph_narration_style(_clean_plain_text_response(rewritten))
+
+
+def _shorten_paragraph_for_one_minute(paragraph_text, model):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are editing spoken narration for short-form video. "
+                "Keep it direct and natural. Keep the same meaning and story arc, but tighten it so it reads aloud in about one minute. "
+                "Do not turn it into bullet points. Keep it as one paragraph. Return only the rewritten paragraph."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Shorten this so it is around 1 minute when read out loud. "
+                "Keep the full flow understandable, but make it tighter and more direct.\n\n"
+                f"{paragraph_text}"
+            ),
+        },
+    ]
+    rewritten = _create_text_completion(
+        messages=messages,
+        model=model,
+        max_tokens=_get_shorten_rewrite_max_tokens(),
+        temperature=0.4,
+    )
+    return _normalize_paragraph_narration_style(_clean_plain_text_response(rewritten))
+
+
+def _refresh_metadata_from_final_paragraph(paragraph_text, topic, model, retries=3):
+    prompt = f"""
+You are refreshing metadata for a narrated short-form video based on the final spoken paragraph.
+
+Topic context: {topic}
+
+Final narration paragraph:
+{paragraph_text}
+
+Return ONE valid JSON object with these exact fields:
+1) title
+2) description
+3) thumbnail_hf_prompt
+4) thumbnail_unsplash_query
+
+Rules:
+- title should be 40-60 characters and clickable.
+- description should be 100-200 characters and include 3-4 hashtags.
+- thumbnail_hf_prompt should be 20-30 words, image-only, with concrete scene details and no text/logos.
+- thumbnail_unsplash_query should be 2-4 words.
+- Base everything on the final paragraph, not a longer draft.
+"""
+
+    for attempt in range(retries):
+        try:
+            response_content = _create_json_completion(
+                prompt=prompt,
+                model=model,
+                max_tokens=_get_metadata_refresh_max_tokens(),
+                temperature=0.5,
+            )
+            parsed = _parse_json_response(response_content)
+            required = ["title", "description", "thumbnail_hf_prompt", "thumbnail_unsplash_query"]
+            missing = [field for field in required if not str(parsed.get(field, "") or "").strip()]
+            if missing:
+                raise ValueError(f"Metadata refresh missing fields: {missing}")
+            return {field: str(parsed.get(field, "") or "").strip() for field in required}
+        except Exception as exc:
+            logger.warning(
+                "Metadata refresh failed (attempt %s/%s): %s",
+                attempt + 1,
+                retries,
+                exc,
+            )
+            if isinstance(exc, ScitelyAPIError) and getattr(exc, "provider", "") == "scitely":
+                disable_scitely(exc)
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+
+    return {}
+
+
+def _postprocess_content_package(content_package, topic, model, retries=3, paragraph_only=False):
+    package = dict(content_package or {})
+    raw_paragraph = _normalize_paragraph_narration_style(
+        package.get("paragraph") or package.get("script") or ""
+    )
+    if not raw_paragraph:
+        return package
+
+    direct_paragraph = raw_paragraph
+    final_paragraph = raw_paragraph
+
+    if _has_chat_ai_provider():
+        try:
+            direct_candidate = _rewrite_paragraph_direct_speech(raw_paragraph, model)
+            if direct_candidate:
+                direct_paragraph = direct_candidate
+        except Exception as exc:
+            logger.warning("Direct-speech rewrite failed; keeping raw paragraph: %s", exc)
+
+        try:
+            shortened_candidate = _shorten_paragraph_for_one_minute(direct_paragraph, model)
+            if shortened_candidate:
+                final_paragraph = shortened_candidate
+        except Exception as exc:
+            logger.warning("One-minute shorten rewrite failed; keeping direct paragraph: %s", exc)
+
+        refreshed = _refresh_metadata_from_final_paragraph(final_paragraph, topic=topic, model=model, retries=retries)
+        if refreshed:
+            package.update(refreshed)
+
+    package["raw_paragraph"] = raw_paragraph
+    package["direct_paragraph"] = direct_paragraph
+    package["final_paragraph"] = final_paragraph
+    package["paragraph"] = final_paragraph
+    if paragraph_only:
+        package["script"] = final_paragraph
+    else:
+        package["script"] = _derive_script_beats_from_paragraph(final_paragraph)
+    return package
 
 
 def _load_script_template():
@@ -827,6 +1053,13 @@ def _build_content_package_from_story(topic, story, model, max_tokens, retries, 
             if generation_context:
                 content_package["source_story_generation_context"] = generation_context
 
+            content_package = _postprocess_content_package(
+                content_package,
+                topic=topic,
+                model=model,
+                retries=retries,
+                paragraph_only=paragraph_only,
+            )
             logger.info("Generated content package from source story successfully")
             return content_package
         except Exception as exc:
@@ -1958,6 +2191,156 @@ def generate_timed_word_color_plan(script_sections, topic="", model=None, retrie
 
     return {}
 
+
+def _fallback_segment_paragraph_for_tts(paragraph_text):
+    text = " ".join(str(paragraph_text or "").split()).strip()
+    if not text:
+        return []
+
+    raw_parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    if not raw_parts:
+        raw_parts = [text]
+
+    segments = []
+    for part in raw_parts:
+        clauses = [part]
+        word_count = len(part.split())
+        if word_count > 20:
+            clauses = [chunk.strip(" ,") for chunk in re.split(r"\s*(?:,|;|:|\s+\-\s+)\s*", part) if chunk.strip(" ,")]
+        if len(clauses) == 1 and word_count > 20:
+            clauses = [chunk.strip() for chunk in re.split(r"\s+(?=(?:and|but|so|because|then|when|while|after|before|finally)\b)", part) if chunk.strip()]
+
+        current = []
+        current_words = 0
+        for clause in clauses:
+            clause_words = len(clause.split())
+            if current and current_words + clause_words > 16:
+                joined = " ".join(current).strip()
+                if joined:
+                    segments.append(
+                        {
+                            "text": joined,
+                            "pause_after_seconds": 0.26 if joined[-1:] in ".!?" else 0.18,
+                        }
+                    )
+                current = [clause]
+                current_words = clause_words
+            else:
+                current.append(clause)
+                current_words += clause_words
+
+        if current:
+            joined = " ".join(current).strip()
+            if joined:
+                segments.append(
+                    {
+                        "text": joined,
+                        "pause_after_seconds": 0.26 if joined[-1:] in ".!?" else 0.18,
+                    }
+                )
+
+    normalized = []
+    for idx, segment in enumerate(segments):
+        segment_text = " ".join(str(segment.get("text") or "").split()).strip()
+        if not segment_text:
+            continue
+        pause_after = float(segment.get("pause_after_seconds", 0.18) or 0.18)
+        normalized.append(
+            {
+                "index": idx,
+                "text": segment_text,
+                "pause_after_seconds": max(0.0, min(0.45, pause_after)),
+            }
+        )
+
+    if normalized:
+        normalized[-1]["pause_after_seconds"] = 0.0
+    return normalized
+
+
+def segment_paragraph_for_tts(paragraph_text, model=None, retries=3):
+    paragraph = _normalize_paragraph_narration_style(paragraph_text)
+    if not paragraph:
+        return []
+
+    if not _has_chat_ai_provider():
+        return _fallback_segment_paragraph_for_tts(paragraph)
+
+    model = _get_completion_model(model)
+    prompt = f"""
+You are splitting spoken narration into natural breath-sized chunks for text-to-speech.
+
+Narration paragraph:
+{paragraph}
+
+Rules:
+- Split by meaning and breathing, not by every sentence.
+- Each chunk should sound natural when spoken aloud in one breath.
+- Keep all original meaning and wording.
+- Each chunk should usually be around 5 to 22 words.
+- pause_after_seconds should usually be between 0.10 and 0.35.
+- The final chunk must use pause_after_seconds of 0.0.
+
+Return ONLY valid JSON in this exact shape:
+{{
+  "segments": [
+    {{"text": "first spoken chunk", "pause_after_seconds": 0.18}},
+    {{"text": "next spoken chunk", "pause_after_seconds": 0.24}}
+  ]
+}}
+"""
+
+    for attempt in range(retries):
+        try:
+            response_content = _create_json_completion(
+                prompt=prompt,
+                model=model,
+                max_tokens=_get_segmentation_max_tokens(),
+                temperature=0.35,
+            )
+            parsed = _parse_json_response(response_content)
+            raw_segments = parsed.get("segments", []) if isinstance(parsed, dict) else []
+            normalized = []
+            for idx, item in enumerate(raw_segments):
+                if not isinstance(item, dict):
+                    continue
+                segment_text = " ".join(str(item.get("text") or "").split()).strip()
+                if not segment_text:
+                    continue
+                try:
+                    pause_after = float(item.get("pause_after_seconds", 0.18) or 0.18)
+                except Exception:
+                    pause_after = 0.18
+                normalized.append(
+                    {
+                        "index": idx,
+                        "text": segment_text,
+                        "pause_after_seconds": max(0.0, min(0.45, pause_after)),
+                    }
+                )
+
+            if normalized:
+                normalized[-1]["pause_after_seconds"] = 0.0
+                original_words = _count_words(paragraph)
+                segmented_words = sum(_count_words(item.get("text")) for item in normalized)
+                if segmented_words >= max(8, int(original_words * 0.7)):
+                    return normalized
+                raise ValueError(f"Segmented narration kept too few words ({segmented_words}/{original_words})")
+        except Exception as exc:
+            logger.warning(
+                "Narration segmentation failed (attempt %s/%s): %s",
+                attempt + 1,
+                retries,
+                exc,
+            )
+            if isinstance(exc, ScitelyAPIError) and getattr(exc, "provider", "") == "scitely":
+                disable_scitely(exc)
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+
+    return _fallback_segment_paragraph_for_tts(paragraph)
+
+
 def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3, source_story_text=None, paragraph_only=False):
     """
     Generate a comprehensive content package for a YouTube Short in a single API call.
@@ -2177,6 +2560,13 @@ def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3
                     # Clean the script text of any remaining instructional labels
                     content_package["script"] = filter_instructional_labels(content_package["script"])
 
+                content_package = _postprocess_content_package(
+                    content_package,
+                    topic=topic_for_prompt,
+                    model=model,
+                    retries=retries,
+                    paragraph_only=paragraph_only,
+                )
                 content_package["effective_topic"] = str(content_package.get("title") or topic_for_prompt).strip()
 
                 logger.info(f"Successfully generated comprehensive content package:")
@@ -2219,6 +2609,13 @@ def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3
         retries,
     )
     package = _build_fallback_content_package(topic_for_prompt, paragraph_only=paragraph_only)
+    package = _postprocess_content_package(
+        package,
+        topic=topic_for_prompt,
+        model=model,
+        retries=retries,
+        paragraph_only=paragraph_only,
+    )
     package["effective_topic"] = str(package.get("title") or topic_for_prompt).strip()
     return package
 

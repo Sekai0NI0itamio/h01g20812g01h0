@@ -54,7 +54,7 @@ env:
   SHORTS_ALLOW_LOCAL_DEV: "false"
   SHORTS_MAIN_VIDEO_MODE: ${{ inputs.main_video_mode }}
   SHORTS_SOURCE_STORY: ${{ inputs.story_text }}
-  ENABLE_YOUTUBE_UPLOAD: "false"
+  ENABLE_YOUTUBE_UPLOAD: ${{ inputs.upload_to_youtube }}
   ENABLE_TOR_TUNNEL: ${{ inputs.use_tor_tunnel }}
   TOR_PROXY_URL: socks5h://127.0.0.1:9050
   AI_USE_TOR_TUNNEL: "false"
@@ -95,6 +95,10 @@ env:
   SHORTS_MEME_DURATION_MAX: "2.5"
   SHORTS_SYNTHETIC_STORY_MAX_TOKENS: "5000"
   SHORTS_CONTENT_PACKAGE_MAX_TOKENS: "4000"
+  SHORTS_DIRECT_REWRITE_MAX_TOKENS: "2600"
+  SHORTS_SHORTEN_REWRITE_MAX_TOKENS: "2200"
+  SHORTS_METADATA_REFRESH_MAX_TOKENS: "1800"
+  SHORTS_TTS_SEGMENTATION_MAX_TOKENS: "1800"
   SHORTS_MUSIC_DIR: Music
   SHORTS_BRAINROT_DIR: AttentionGrabBrainRotVideos
   SHORTS_GREENSCREEN_DIR: GreenScreenAnimeGirls
@@ -104,254 +108,9 @@ env:
   RENDER_MEMORY_PER_WORKER_GB: "0.8"
 
 jobs:
-  prepare-matrix:
+  generate-shorts:
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Build short matrix
-        id: matrix
-        run: |
-          matrix_json="$(python -m automation.actions_pipeline prepare-matrix --count "${{ inputs.video_count }}" --story-text "${{ inputs.story_text }}")"
-          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
-          echo "$matrix_json"
-
-  install:
-    needs: prepare-matrix
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-  prepare-content:
-    needs: [prepare-matrix, install]
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Install and start Tor tunnel
-        if: ${{ inputs.use_tor_tunnel }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tor netcat-openbsd
-          sudo service tor start || sudo systemctl start tor || true
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 9050; then exit 0; fi
-            sleep 1
-          done
-          echo "Tor failed to start"
-          exit 1
-
-      - name: Prepare content bundle
-        run: |
-          bundle_dir="workflow_bundles/short_${{ matrix.short_index }}"
-          python -m automation.actions_pipeline prepare-content \
-            --short-index "${{ matrix.short_index }}" \
-            --bundle-dir "$bundle_dir" \
-            --topic-direction "${{ inputs.topic_direction }}" \
-            --story-text "${{ inputs.story_text }}"
-
-      - name: Upload content bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-content-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-          if-no-files-found: error
-
-  generate-audio:
-    needs: [prepare-matrix, install, prepare-content]
-    runs-on: ubuntu-latest
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Download content bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-content-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-
-      - name: Generate master narration and transcript
-        run: |
-          python -m automation.actions_pipeline generate-audio \
-            --short-index "${{ matrix.short_index }}" \
-            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
-
-      - name: Upload audio bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-audio-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-          if-no-files-found: error
-
-  plan-memes:
-    needs: [prepare-matrix, install, generate-audio]
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Install and start Tor tunnel
-        if: ${{ inputs.use_tor_tunnel }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tor netcat-openbsd
-          sudo service tor start || sudo systemctl start tor || true
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 9050; then exit 0; fi
-            sleep 1
-          done
-          echo "Tor failed to start"
-          exit 1
-
-      - name: Download audio bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-audio-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-
-      - name: Plan paired memes
-        run: |
-          python -m automation.actions_pipeline plan-memes \
-            --short-index "${{ matrix.short_index }}" \
-            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
-
-      - name: Upload meme bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-memes-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-          if-no-files-found: error
-
-  fetch-visual-assets:
-    needs: [prepare-matrix, install, generate-audio]
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Download audio bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-audio-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-
-      - name: Fetch transcript-timed visuals
-        run: |
-          python -m automation.actions_pipeline fetch-visual-assets \
-            --short-index "${{ matrix.short_index }}" \
-            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
-
-      - name: Upload visual bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-visuals-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-          if-no-files-found: error
-
-  generate-thumbnail:
-    needs: [prepare-matrix, install, prepare-content]
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    timeout-minutes: 480
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -375,7 +134,6 @@ jobs:
       - name: Install and start Tor tunnel
         if: ${{ inputs.use_tor_tunnel }}
         run: |
-          sudo apt-get update
           sudo apt-get install -y tor netcat-openbsd
           sudo service tor start || sudo systemctl start tor || true
           for i in $(seq 1 30); do
@@ -384,52 +142,6 @@ jobs:
           done
           echo "Tor failed to start"
           exit 1
-
-      - name: Download content bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-content-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-
-      - name: Generate thumbnail
-        run: |
-          python -m automation.actions_pipeline generate-thumbnail \
-            --short-index "${{ matrix.short_index }}" \
-            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
-
-      - name: Upload thumbnail bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-thumbnail-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-          if-no-files-found: error
-
-  render-base:
-    needs: [prepare-matrix, install, fetch-visual-assets]
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
 
       - name: Tune render parallelism
         run: |
@@ -440,184 +152,8 @@ jobs:
           echo "RENDER_WORKER_COUNT=$cores" >> "$GITHUB_ENV"
           echo "RENDER_FFMPEG_THREADS=1" >> "$GITHUB_ENV"
 
-      - name: Download visual bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-visuals-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-
-      - name: Render base video
-        run: |
-          python -m automation.actions_pipeline render-base \
-            --short-index "${{ matrix.short_index }}" \
-            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
-
-      - name: Upload base bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-base-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-          if-no-files-found: error
-
-  finalize-video:
-    needs: [prepare-matrix, install, render-base, plan-memes]
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Download base bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-base-${{ matrix.short_index }}
-          path: workflow_stage/base
-
-      - name: Download meme bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-memes-${{ matrix.short_index }}
-          path: workflow_stage/memes
-
-      - name: Merge bundle branches
-        run: |
-          bundle_dir="workflow_bundles/short_${{ matrix.short_index }}"
-          mkdir -p "$bundle_dir"
-          cp -R workflow_stage/base/. "$bundle_dir/"
-          cp -R workflow_stage/memes/. "$bundle_dir/"
-
-      - name: Finalize video
-        run: |
-          python -m automation.actions_pipeline finalize-video \
-            --short-index "${{ matrix.short_index }}" \
-            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}"
-
-      - name: Upload final bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-final-${{ matrix.short_index }}
-          path: workflow_bundles/short_${{ matrix.short_index }}
-          if-no-files-found: error
-
-  collect-artifacts:
-    needs: [prepare-matrix, install, finalize-video, generate-thumbnail]
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Download final bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-final-${{ matrix.short_index }}
-          path: workflow_stage/final
-
-      - name: Download thumbnail bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: bundle-thumbnail-${{ matrix.short_index }}
-          path: workflow_stage/thumbnail
-
-      - name: Merge final and thumbnail bundle
-        run: |
-          bundle_dir="workflow_bundles/short_${{ matrix.short_index }}"
-          mkdir -p "$bundle_dir"
-          cp -R workflow_stage/final/. "$bundle_dir/"
-          cp -R workflow_stage/thumbnail/. "$bundle_dir/"
-
-      - name: Collect workflow artifacts
-        run: |
-          python -m automation.actions_pipeline collect-artifacts \
-            --short-index "${{ matrix.short_index }}" \
-            --bundle-dir "workflow_bundles/short_${{ matrix.short_index }}" \
-            --artifacts-dir "workflow_artifacts"
-
-      - name: Upload collected short artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: collected-short-${{ matrix.short_index }}
-          path: workflow_artifacts
-          if-no-files-found: error
-
-  upload-generated-artifacts:
-    needs: collect-artifacts
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download collected short artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: collected-short-*
-          path: workflow_artifacts
-          merge-multiple: true
-
-      - name: Upload generated artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: generated-shorts-${{ github.run_id }}
-          path: workflow_artifacts
-          if-no-files-found: error
-
-  upload-to-youtube:
-    if: ${{ inputs.upload_to_youtube }}
-    needs: upload-generated-artifacts
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Download generated artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: generated-shorts-${{ github.run_id }}
-          path: workflow_artifacts
-
       - name: Prepare YouTube credentials
+        if: ${{ inputs.upload_to_youtube }}
         env:
           YOUTUBE_CLIENT_SECRET_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}
           YOUTUBE_TOKEN_PICKLE_B64: ${{ secrets.YOUTUBE_TOKEN_PICKLE_B64 }}
@@ -639,14 +175,27 @@ jobs:
             elif printf '%s' "$token_trimmed" | base64 --decode > automation/credentials/token.pickle 2>/dev/null; then
               echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.pickle" >> "$GITHUB_ENV"
             else
-              printf '%s' "$token_trimmed" > automation/credentials/token.json
-              echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.json" >> "$GITHUB_ENV"
+              printf '%s' "$token_trimmed" > automation/credentials/token.pickle
+              echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.pickle" >> "$GITHUB_ENV"
             fi
           elif [ -n "$YOUTUBE_TOKEN_JSON" ]; then
             printf '%s' "$YOUTUBE_TOKEN_JSON" > automation/credentials/token.json
             echo "YOUTUBE_TOKEN_PATH=$GITHUB_WORKSPACE/automation/credentials/token.json" >> "$GITHUB_ENV"
           fi
 
-      - name: Upload artifacts to YouTube
+      - name: Run single-job Actions pipeline
         run: |
-          python -m automation.upload_artifacts_to_youtube --artifacts-dir workflow_artifacts
+          python -m automation.actions_pipeline run-actions-job \
+            --count "${{ inputs.video_count }}" \
+            --topic-direction "${{ inputs.topic_direction }}" \
+            --story-text "${{ inputs.story_text }}" \
+            --artifacts-dir "workflow_artifacts" \
+            --upload-to-youtube "${{ inputs.upload_to_youtube }}" \
+            --youtube-privacy public
+
+      - name: Upload generated artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-shorts-${{ github.run_id }}
+          path: workflow_artifacts
+          if-no-files-found: error
