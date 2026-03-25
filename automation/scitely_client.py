@@ -23,29 +23,16 @@ if not AI_USE_TOR_TUNNEL:
     logger.info("AI provider requests will bypass Tor tunnel")
 
 
-DEFAULT_G4F_MODEL = "deepseek-v3.2"
+DEFAULT_G4F_MODEL = "gpt-4o"
 DEFAULT_G4F_MODEL_FALLBACKS = (
-    "deepseek-v3.2",
-    "deepseek-v3",
-    "deepseek-v3-0324",
-    "deepseek-chat",
-    "deepseek-r1",
-    "qwen-2.5-coder",
-    "qwen-2.5-72b",
-    "qwen-2.5-32b",
-    "qwen-2.5-14b",
-    "qwen-2.5",
-    "qwen-max",
-    "qwen-plus",
-    "qwen-turbo",
-    "llama-3.3-70b",
-    "llama-3.2-90b",
-    "llama-3.2-11b",
-    "llama-3.1-70b",
-    "llama-3.1-8b",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "gpt-4o",
+    "chatgpt-4o-latest",
     "gpt-4o-mini",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-3.5-turbo",
 )
 
 FREE_MODEL_ERROR_MARKERS = (
@@ -166,6 +153,13 @@ def _collect_g4f_model_name(candidate) -> str:
     return text
 
 
+def _is_gpt_family_model_name(name: str) -> bool:
+    lower = (name or "").strip().lower()
+    if not lower:
+        return False
+    return lower.startswith("gpt-") or lower.startswith("chatgpt-")
+
+
 def _discover_g4f_free_models():
     try:
         import g4f.models as g4f_models
@@ -197,13 +191,13 @@ def _discover_g4f_free_models():
 def get_g4f_model_fallbacks():
     raw = (os.getenv("G4F_MODEL_FALLBACKS") or "").strip()
     configured = [item.strip() for item in raw.split(",") if item.strip()]
-    discovered = _discover_g4f_free_models()
+    discovered = [name for name in _discover_g4f_free_models() if _is_gpt_family_model_name(name)]
 
     candidates = [get_g4f_model()] + configured + list(DEFAULT_G4F_MODEL_FALLBACKS) + discovered
     deduped = []
     for candidate in candidates:
         name = _collect_g4f_model_name(candidate)
-        if name and name not in deduped:
+        if name and _is_gpt_family_model_name(name) and name not in deduped:
             deduped.append(name)
     return deduped
 

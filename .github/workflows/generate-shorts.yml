@@ -62,8 +62,8 @@ env:
   VIDEO_FETCH_USE_TOR_TUNNEL: "false"
   AI_PROVIDER: g4f
   AI_PROVIDER_ORDER: g4f
-  G4F_MODEL: deepseek-v3.2
-  G4F_MODEL_FALLBACKS: deepseek-v3,deepseek-v3-0324,deepseek-chat,deepseek-r1,qwen-2.5-coder,qwen-2.5-72b,qwen-2.5-14b,qwen-2.5,llama-3.3-70b,llama-3.1-8b,gemini-2.0-flash,gemini-2.5-flash,gpt-4o-mini
+  G4F_MODEL: gpt-4o
+  G4F_MODEL_FALLBACKS: chatgpt-4o-latest,gpt-4o-mini,gpt-4.1,gpt-4.1-mini,gpt-4-turbo,gpt-4,gpt-3.5-turbo
   PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
   PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
   UNSPLASH_API_KEY: ${{ secrets.UNSPLASH_API_KEY || secrets.UNSPLASH_ACCESS_KEY || secrets.UNSPLASH_ACCESS_ID }}
