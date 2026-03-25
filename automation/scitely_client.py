@@ -1,15 +1,17 @@
-import os
+import json
 import logging
-from typing import List
+import os
+from typing import Any, Iterable, List
 
-import requests
 from dotenv import load_dotenv
+
 from helper.network import create_requests_session
 
 try:
     from g4f.client import Client as G4FClient
 except Exception:
     G4FClient = None
+
 
 load_dotenv()
 
@@ -20,19 +22,52 @@ logger = logging.getLogger(__name__)
 if not AI_USE_TOR_TUNNEL:
     logger.info("AI provider requests will bypass Tor tunnel")
 
-DEFAULT_SCITELY_BASE_URL = "https://api.scitely.com/v1"
-DEFAULT_SCITELY_MODEL = "deepseek-v3.2"
-DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
+
 DEFAULT_G4F_MODEL = "deepseek-v3.2"
 DEFAULT_G4F_MODEL_FALLBACKS = (
+    "deepseek-v3.2",
+    "deepseek-v3",
     "deepseek-v3-0324",
-    "gpt-4.1",
-    "gpt-4o",
+    "deepseek-chat",
+    "deepseek-r1",
+    "qwen-2.5-coder",
+    "qwen-2.5-72b",
+    "qwen-2.5-32b",
+    "qwen-2.5-14b",
+    "qwen-2.5",
+    "qwen-max",
+    "qwen-plus",
+    "qwen-turbo",
+    "llama-3.3-70b",
+    "llama-3.2-90b",
+    "llama-3.2-11b",
+    "llama-3.1-70b",
+    "llama-3.1-8b",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
     "gpt-4o-mini",
 )
 
-_SCITELY_DISABLED = False
+FREE_MODEL_ERROR_MARKERS = (
+    'add a "api_key"',
+    "add an api_key",
+    "api key",
+    "api_key",
+    "model does not exist",
+    "model not found",
+    "does not exist in",
+    "invalid model",
+    "unsupported model",
+    "rate limit",
+    "too many requests",
+    "quota",
+    "permission denied",
+    "access denied",
+    "authentication",
+    "unauthorized",
+    "invalid api key",
+)
+
 _G4F_CLIENT = None
 
 
@@ -43,31 +78,36 @@ class ScitelyAPIError(RuntimeError):
 
 
 def get_scitely_api_key():
-    return os.getenv("SCITELY_API_KEY") or os.getenv("SCITELY_AUTH_TOKEN")
+    return ""
 
 
 def get_scitely_base_url():
-    value = (os.getenv("SCITELY_BASE_URL") or "").strip()
-    return (value or DEFAULT_SCITELY_BASE_URL).rstrip("/")
+    return ""
 
 
 def get_scitely_model(default=None):
-    value = (os.getenv("SCITELY_MODEL") or "").strip()
-    return value or (default or DEFAULT_SCITELY_MODEL)
+    return default or ""
 
 
 def get_nvidia_api_key():
-    return os.getenv("NVIDIA_API_KEY")
+    return ""
 
 
 def get_nvidia_base_url():
-    value = (os.getenv("NVIDIA_BASE_URL") or "").strip()
-    return (value or DEFAULT_NVIDIA_BASE_URL).rstrip("/")
+    return ""
 
 
 def get_nvidia_model(default=None):
-    value = (os.getenv("NVIDIA_MODEL") or "").strip()
-    return value or (default or DEFAULT_NVIDIA_MODEL)
+    return default or ""
+
+
+def is_scitely_disabled():
+    return True
+
+
+def disable_scitely(reason=None):
+    del reason
+    return None
 
 
 def get_g4f_model(default=None):
@@ -75,65 +115,226 @@ def get_g4f_model(default=None):
     return value or (default or DEFAULT_G4F_MODEL)
 
 
-def get_g4f_model_fallbacks():
-    raw = (os.getenv("G4F_MODEL_FALLBACKS") or "").strip()
-    configured = [item.strip() for item in raw.split(",") if item.strip()]
-    candidates = [get_g4f_model()] + configured + list(DEFAULT_G4F_MODEL_FALLBACKS)
-    deduped = []
-    for candidate in candidates:
-        if candidate and candidate not in deduped:
-            deduped.append(candidate)
-    return deduped
-
-
 def is_g4f_available():
     return G4FClient is not None
 
 
 def has_any_chat_provider():
-    return bool(get_scitely_api_key() or get_nvidia_api_key() or is_g4f_available())
-
-
-def get_preferred_chat_model(provider=None, default=None):
-    candidate = (provider or get_default_chat_provider() or "g4f").strip().lower()
-    if candidate == "auto":
-        provider_order = _get_provider_order()
-        candidate = provider_order[0] if provider_order else "g4f"
-    if candidate == "nvidia":
-        return get_nvidia_model(default)
-    if candidate == "g4f":
-        return get_g4f_model(default)
-    return get_scitely_model(default)
+    return bool(is_g4f_available())
 
 
 def get_default_chat_provider():
-    provider = os.getenv("AI_PROVIDER", "").strip().lower()
-    if provider in {"scitely", "nvidia", "g4f"}:
-        return provider
-
+    configured = (os.getenv("AI_PROVIDER") or "").strip().lower()
+    if configured and configured != "g4f":
+        logger.warning("Ignoring unsupported AI_PROVIDER=%s; using g4f only.", configured)
     return "g4f"
 
 
+def get_preferred_chat_model(provider=None, default=None):
+    del provider
+    return get_g4f_model(default)
+
+
 def _get_provider_order() -> List[str]:
-    explicit_order = os.getenv("AI_PROVIDER_ORDER", "").strip()
-    if explicit_order:
-        parsed = [item.strip().lower() for item in explicit_order.split(",") if item.strip()]
-        order = [item for item in parsed if item in {"scitely", "nvidia", "g4f"}]
-        if order:
-            return order
+    return ["g4f"]
 
-    default_provider = get_default_chat_provider()
-    fallback_priority = [default_provider, "g4f", "scitely"]
 
-    order = []
-    for candidate in fallback_priority:
-        if candidate in {"scitely", "nvidia", "g4f"} and candidate not in order:
-            order.append(candidate)
+def _is_probably_free_g4f_model(candidate_obj) -> bool:
+    for attr in ("requires_api_key", "requires_auth", "needs_auth", "login_required"):
+        if getattr(candidate_obj, attr, None) is True:
+            return False
 
-    return order or ["g4f", "scitely"]
+    provider_obj = getattr(candidate_obj, "best_provider", None)
+    for attr in ("requires_api_key", "requires_auth", "needs_auth", "login_required"):
+        if getattr(provider_obj, attr, None) is True:
+            return False
+    return True
+
+
+def _collect_g4f_model_name(candidate) -> str:
+    if isinstance(candidate, str):
+        text = candidate.strip()
+    else:
+        text = str(getattr(candidate, "name", "") or "").strip()
+
+    if not text:
+        return ""
+    if text.startswith("_") or len(text) > 120 or " " in text:
+        return ""
+    if text.lower() in {"model", "models", "provider", "providers"}:
+        return ""
+    return text
+
+
+def _discover_g4f_free_models():
+    try:
+        import g4f.models as g4f_models
+    except Exception:
+        return []
+
+    discovered = []
+
+    def add_candidate(candidate):
+        if not _is_probably_free_g4f_model(candidate):
+            return
+        name = _collect_g4f_model_name(candidate)
+        if name and name not in discovered:
+            discovered.append(name)
+
+    model_utils = getattr(g4f_models, "ModelUtils", None)
+    convert = getattr(model_utils, "convert", None) if model_utils else None
+    if isinstance(convert, dict):
+        for key, value in convert.items():
+            add_candidate(value)
+            add_candidate(key)
+
+    for _, value in vars(g4f_models).items():
+        add_candidate(value)
+
+    return discovered
+
+
+def get_g4f_model_fallbacks():
+    raw = (os.getenv("G4F_MODEL_FALLBACKS") or "").strip()
+    configured = [item.strip() for item in raw.split(",") if item.strip()]
+    discovered = _discover_g4f_free_models()
+
+    candidates = [get_g4f_model()] + configured + list(DEFAULT_G4F_MODEL_FALLBACKS) + discovered
+    deduped = []
+    for candidate in candidates:
+        name = _collect_g4f_model_name(candidate)
+        if name and name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
+def _stringify_message_content(content: Any) -> str:
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    parts.append(text)
+                continue
+
+            if isinstance(item, dict):
+                item_type = str(item.get("type") or "").strip().lower()
+                if item_type == "text" and isinstance(item.get("text"), str):
+                    text = item["text"].strip()
+                    if text:
+                        parts.append(text)
+                    continue
+                if item_type in {"input_text", "output_text"} and isinstance(item.get("text"), str):
+                    text = item["text"].strip()
+                    if text:
+                        parts.append(text)
+                    continue
+
+            try:
+                parts.append(json.dumps(item, ensure_ascii=False, sort_keys=True))
+            except Exception:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part).strip()
+
+    if isinstance(content, dict):
+        try:
+            return json.dumps(content, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(content).strip()
+
+    return str(content).strip()
+
+
+def _serialize_tool_calls(tool_calls: Any) -> str:
+    if not tool_calls:
+        return ""
+
+    if not isinstance(tool_calls, list):
+        try:
+            return "Tool calls:\n" + json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return f"Tool calls:\n{tool_calls}"
+
+    rendered = []
+    for call in tool_calls:
+        if isinstance(call, dict):
+            function_data = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = function_data.get("name") or call.get("name") or "unknown_tool"
+            arguments = function_data.get("arguments") or call.get("arguments") or ""
+            if not isinstance(arguments, str):
+                try:
+                    arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+                except Exception:
+                    arguments = str(arguments)
+            rendered.append(f"- {name}: {arguments}".strip())
+        else:
+            rendered.append(f"- {call}")
+
+    return "Tool calls:\n" + "\n".join(rendered)
+
+
+def _normalize_g4f_messages(messages: Iterable[dict]):
+    normalized = []
+
+    for message in messages or []:
+        if not isinstance(message, dict):
+            text = str(message).strip()
+            if text:
+                normalized.append({"role": "user", "content": text})
+            continue
+
+        original_role = str(message.get("role") or "user").strip().lower()
+        role = original_role if original_role in {"system", "user", "assistant"} else "user"
+
+        parts = []
+        if role != original_role and original_role:
+            parts.append(f"[original role: {original_role}]")
+
+        name = str(message.get("name") or "").strip()
+        if name:
+            parts.append(f"[name: {name}]")
+
+        tool_call_id = str(message.get("tool_call_id") or "").strip()
+        if tool_call_id:
+            parts.append(f"[tool_call_id: {tool_call_id}]")
+
+        tool_calls_text = _serialize_tool_calls(message.get("tool_calls"))
+        if tool_calls_text:
+            parts.append(tool_calls_text)
+
+        function_call = message.get("function_call")
+        if function_call:
+            try:
+                parts.append("Function call:\n" + json.dumps(function_call, ensure_ascii=False, sort_keys=True))
+            except Exception:
+                parts.append(f"Function call:\n{function_call}")
+
+        content_text = _stringify_message_content(message.get("content"))
+        if content_text:
+            parts.append(content_text)
+
+        if not parts:
+            continue
+
+        normalized.append({"role": role, "content": "\n\n".join(parts).strip()})
+
+    if not normalized:
+        normalized.append({"role": "user", "content": "Reply with exactly: OK"})
+
+    return normalized
 
 
 def _extract_completion_text(response):
+    if response is None:
+        return ""
+
     if isinstance(response, dict):
         choices = response.get("choices")
         if isinstance(choices, list) and choices:
@@ -141,98 +342,82 @@ def _extract_completion_text(response):
             message = first.get("message") if isinstance(first, dict) else None
             if isinstance(message, dict):
                 content = message.get("content")
-                if isinstance(content, str) and content.strip():
-                    return content.strip()
+                text = _stringify_message_content(content)
+                if text:
+                    return text
+            text = first.get("text") if isinstance(first, dict) else None
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+
         for key in ("content", "output_text", "text", "response"):
             value = response.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return ""
+            text = _stringify_message_content(value)
+            if text:
+                return text
+
+        return ""
+
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        message = getattr(first, "message", None)
+        content = getattr(message, "content", None)
+        text = _stringify_message_content(content)
+        if text:
+            return text
+        text = getattr(first, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    content = getattr(response, "content", None)
+    text = _stringify_message_content(content)
+    if text:
+        return text
+
+    text = str(response).strip()
+    return text
+
+
+def _coerce_completion_payload(response):
+    if isinstance(response, dict):
+        text = _extract_completion_text(response)
+        if text and "choices" not in response:
+            return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+        return response
+
+    for method_name in ("model_dump", "dict"):
+        method = getattr(response, method_name, None)
+        if callable(method):
+            try:
+                payload = method(exclude_none=True)
+                if isinstance(payload, dict):
+                    text = _extract_completion_text(payload)
+                    if text and "choices" not in payload:
+                        return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+                    return payload
+            except Exception:
+                pass
+
+    text = _extract_completion_text(response)
+    if text:
+        return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+    return {"content": str(response)}
+
+
+def _looks_like_g4f_error_text(text: str) -> bool:
+    if not text:
+        return False
+    lower = text.strip().lower()
+    return any(marker in lower for marker in FREE_MODEL_ERROR_MARKERS)
 
 
 def _get_g4f_client():
     global _G4F_CLIENT
     if G4FClient is None:
-        raise ValueError("g4f is not installed")
+        raise ScitelyAPIError("g4f is not installed", provider="g4f")
     if _G4F_CLIENT is None:
         _G4F_CLIENT = G4FClient()
     return _G4F_CLIENT
-
-
-def is_scitely_disabled():
-    return _SCITELY_DISABLED
-
-
-def disable_scitely(reason=None):
-    global _SCITELY_DISABLED
-    _SCITELY_DISABLED = True
-    if reason:
-        logger.warning("Scitely disabled for the remainder of this run: %s", reason)
-    else:
-        logger.warning("Scitely disabled for the remainder of this run")
-
-
-def _post_chat_completion(base_url, api_key, model, messages, max_tokens, temperature, response_format, stream, timeout, provider_name):
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-    }
-    if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
-    if temperature is not None:
-        payload["temperature"] = temperature
-    if response_format is not None:
-        payload["response_format"] = response_format
-
-    try:
-        response = REQUESTS_SESSION.post(
-            f"{base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
-        raise ScitelyAPIError(
-            f"{provider_name} request error calling {base_url}/chat/completions: {exc}",
-            provider=provider_name,
-        ) from exc
-
-    if not response.ok:
-        try:
-            error_payload = response.json()
-        except ValueError:
-            error_payload = {}
-
-        message = (
-            error_payload.get("error", {}).get("message")
-            or error_payload.get("message")
-            or response.text
-            or f"HTTP {response.status_code}"
-        )
-
-        request_id = (
-            response.headers.get("x-request-id")
-            or response.headers.get("x-correlation-id")
-            or response.headers.get("nvidia-request-id")
-            or ""
-        )
-        body_preview = (response.text or "").strip().replace("\n", " ")[:800]
-        detail = (
-            f"provider={provider_name}; "
-            f"http_status={response.status_code}; "
-            f"url={response.url}; "
-            f"model={model}; "
-            f"request_id={request_id or 'n/a'}; "
-            f"message={message}; "
-            f"body_preview={body_preview or 'n/a'}"
-        )
-        raise ScitelyAPIError(detail, provider=provider_name)
-
-    return response.json()
 
 
 def create_chat_completion(
@@ -245,160 +430,68 @@ def create_chat_completion(
     timeout=90,
     provider="auto",
 ):
-    global _SCITELY_DISABLED
+    del max_tokens, temperature, response_format, stream, timeout
 
-    scitely_api_key = get_scitely_api_key()
-    nvidia_api_key = get_nvidia_api_key()
+    normalized_messages = _normalize_g4f_messages(messages)
+    requested_model = _collect_g4f_model_name(model) if model else ""
+    candidate_models = ([requested_model] if requested_model else []) + get_g4f_model_fallbacks()
 
-    scitely_error = None
+    deduped_models = []
+    for candidate in candidate_models:
+        if candidate and candidate not in deduped_models:
+            deduped_models.append(candidate)
 
     provider = (provider or get_default_chat_provider()).strip().lower()
-    if provider not in {"auto", "scitely", "nvidia", "g4f"}:
-        raise ValueError(f"Unsupported provider: {provider}")
+    if provider not in {"auto", "g4f"}:
+        raise ValueError(f"Unsupported provider: {provider}. Only g4f is supported.")
 
-    def call_nvidia():
-        if not nvidia_api_key:
-            raise ValueError("NVIDIA_API_KEY is not set")
-        # NVIDIA Integrate API is OpenAI-compatible, but this project keeps
-        # requests minimal to avoid host-specific param mismatches.
-        return _post_chat_completion(
-            base_url=get_nvidia_base_url(),
-            api_key=nvidia_api_key,
-            model=model if provider == "nvidia" and model else get_nvidia_model(),
-            messages=messages,
-            max_tokens=None,
-            temperature=None,
-            response_format=None,
-            stream=stream,
-            timeout=timeout,
-            provider_name="nvidia",
-        )
+    last_exc = None
+    client = _get_g4f_client()
 
-    def call_g4f():
-        last_exc = None
-        requested_model = (model or "").strip()
-        candidate_models = [requested_model] if requested_model else get_g4f_model_fallbacks()
-
-        for candidate_model in candidate_models:
-            try:
-                response = _get_g4f_client().chat.completions.create(
-                    model=candidate_model,
-                    messages=messages,
-                )
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("g4f chat completion failed with model %s: %s", candidate_model, exc)
-                continue
-
-            if hasattr(response, "model_dump"):
-                try:
-                    return response.model_dump(exclude_none=True)
-                except Exception:
-                    pass
-            if hasattr(response, "dict"):
-                try:
-                    return response.dict(exclude_none=True)
-                except Exception:
-                    pass
-            if isinstance(response, dict):
-                return response
-            return {"content": str(response)}
-
-        raise ScitelyAPIError(
-            f"g4f request failed across candidate models {candidate_models}: {last_exc}",
-            provider="g4f",
-        ) from last_exc
-
-    def call_scitely():
-        if not scitely_api_key:
-            raise ValueError("Scitely API key is not set")
-        return _post_chat_completion(
-            base_url=get_scitely_base_url(),
-            api_key=scitely_api_key,
-            model=model if provider == "scitely" and model else get_scitely_model(),
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            response_format=response_format,
-            stream=stream,
-            timeout=timeout,
-            provider_name="scitely",
-        )
-
-    if provider == "nvidia":
-        return call_nvidia()
-
-    if provider == "g4f":
-        return call_g4f()
-
-    if provider == "scitely":
+    for candidate_model in deduped_models:
         try:
-            return call_scitely()
-        except ScitelyAPIError as exc:
-            disable_scitely(exc)
-            raise
+            response = client.chat.completions.create(
+                model=candidate_model,
+                messages=normalized_messages,
+            )
+            payload = _coerce_completion_payload(response)
+            text = _extract_completion_text(payload)
+            if not text:
+                raise ScitelyAPIError(
+                    f"g4f returned an empty response for model {candidate_model}",
+                    provider="g4f",
+                )
+            if _looks_like_g4f_error_text(text):
+                raise ScitelyAPIError(
+                    f"g4f returned provider error text for model {candidate_model}: {text}",
+                    provider="g4f",
+                )
+            return payload
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("g4f chat completion failed with model %s: %s", candidate_model, exc)
+            continue
 
-    for candidate in _get_provider_order():
-        if candidate == "scitely":
-            if not scitely_api_key or _SCITELY_DISABLED:
-                continue
-            try:
-                return call_scitely()
-            except ScitelyAPIError as exc:
-                scitely_error = exc
-                disable_scitely(exc)
-                logger.warning("Scitely chat completion failed; trying next provider: %s", exc)
-                continue
-
-        if candidate == "nvidia":
-            if not nvidia_api_key:
-                continue
-            try:
-                return call_nvidia()
-            except ScitelyAPIError as exc:
-                logger.warning("NVIDIA chat completion failed; trying next provider: %s", exc)
-                scitely_error = exc
-                continue
-
-        if candidate == "g4f":
-            try:
-                return call_g4f()
-            except ScitelyAPIError as exc:
-                logger.warning("g4f chat completion failed; trying next provider: %s", exc)
-                scitely_error = exc
-                continue
-
-    if scitely_error:
-        raise scitely_error
-
-    raise ValueError(
-        "No working AI provider is configured. Install g4f or explicitly configure Scitely/NVIDIA."
-    )
+    raise ScitelyAPIError(
+        f"g4f request failed across candidate models {deduped_models}: {last_exc}",
+        provider="g4f",
+    ) from last_exc
 
 
 def select_working_provider_for_run():
     test_messages = [{"role": "user", "content": "Reply with exactly: OK"}]
-    errors = []
-    provider_order = _get_provider_order()
+    logger.info("Startup AI provider probe order: %s", _get_provider_order())
 
-    logger.info("Startup AI provider probe order: %s", provider_order)
-
-    for provider in provider_order:
-        try:
-            response = create_chat_completion(
-                messages=test_messages,
-                provider=provider,
-                timeout=30,
-            )
-            text = _extract_completion_text(response)
-            if text:
-                os.environ["AI_PROVIDER"] = provider
-                logger.info("Selected AI provider for this run: %s", provider)
-                return provider
-            errors.append(f"{provider}: empty response")
-        except Exception as exc:
-            errors.append(f"{provider}: {exc}")
-
-    raise RuntimeError(
-        "No AI provider passed startup probe. " + " | ".join(errors)
+    response = create_chat_completion(
+        messages=test_messages,
+        provider="g4f",
+        timeout=30,
     )
+    text = _extract_completion_text(response)
+    if not text:
+        raise RuntimeError("No AI provider passed startup probe: g4f returned an empty response")
+
+    os.environ["AI_PROVIDER"] = "g4f"
+    os.environ["AI_PROVIDER_ORDER"] = "g4f"
+    logger.info("Selected AI provider for this run: g4f")
+    return "g4f"

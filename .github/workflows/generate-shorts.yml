@@ -61,14 +61,9 @@ env:
   IMAGE_SEARCH_USE_TOR_TUNNEL: "false"
   VIDEO_FETCH_USE_TOR_TUNNEL: "false"
   AI_PROVIDER: g4f
-  AI_PROVIDER_ORDER: g4f,scitely
+  AI_PROVIDER_ORDER: g4f
   G4F_MODEL: deepseek-v3.2
-  G4F_MODEL_FALLBACKS: deepseek-v3-0324
-  SCITELY_API_KEY: ${{ secrets.SCITELY_API_KEY }}
-  SCITELY_AUTH_TOKEN: ${{ secrets.SCITELY_AUTH_TOKEN }}
-  SCITELY_MODEL: ${{ secrets.SCITELY_MODEL }}
-  NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-  NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
+  G4F_MODEL_FALLBACKS: deepseek-v3,deepseek-v3-0324,deepseek-chat,deepseek-r1,qwen-2.5-coder,qwen-2.5-72b,qwen-2.5-14b,qwen-2.5,llama-3.3-70b,llama-3.1-8b,gemini-2.0-flash,gemini-2.5-flash,gpt-4o-mini
   PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
   PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
   UNSPLASH_API_KEY: ${{ secrets.UNSPLASH_API_KEY || secrets.UNSPLASH_ACCESS_KEY || secrets.UNSPLASH_ACCESS_ID }}

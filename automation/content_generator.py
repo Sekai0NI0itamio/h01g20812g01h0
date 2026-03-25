@@ -13,11 +13,7 @@ from automation.scitely_client import (
     disable_scitely,
     get_default_chat_provider,
     get_preferred_chat_model,
-    get_nvidia_api_key,
-    is_scitely_disabled,
     is_g4f_available,
-    get_scitely_api_key,
-    get_scitely_model,
     has_any_chat_provider,
 )
 
@@ -696,7 +692,7 @@ def _should_skip_story_rewrite(story_body):
 
 
 def _has_structured_ai_provider():
-    return bool(get_scitely_api_key() or get_nvidia_api_key())
+    return _has_chat_ai_provider()
 
 
 def _has_chat_ai_provider():
@@ -708,10 +704,7 @@ def _get_completion_model(model=None):
 
 
 def _get_active_completion_provider():
-    provider = get_default_chat_provider()
-    if provider == "scitely" and is_scitely_disabled():
-        return "auto"
-    return provider
+    return get_default_chat_provider()
 
 
 def _parse_json_response(response_content):
@@ -750,6 +743,22 @@ def _extract_completion_content(response):
             content = message.get("content")
             if isinstance(content, str) and content.strip():
                 return content.strip()
+            if isinstance(content, list):
+                flattened_parts = []
+                for item in content:
+                    if isinstance(item, str) and item.strip():
+                        flattened_parts.append(item.strip())
+                    elif isinstance(item, dict):
+                        text = item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            flattened_parts.append(text.strip())
+                        else:
+                            flattened_parts.append(json.dumps(item, ensure_ascii=False, sort_keys=True))
+                    else:
+                        flattened_parts.append(str(item))
+                flattened = "\n".join(part for part in flattened_parts if part).strip()
+                if flattened:
+                    return flattened
 
         # Some providers return direct text on choice
         text = first.get("text") if isinstance(first, dict) else None
@@ -783,16 +792,6 @@ def _extract_completion_content(response):
 
 def _create_json_completion(prompt, model, max_tokens, temperature):
     provider = _get_active_completion_provider()
-    if provider == "nvidia":
-        response = create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            provider="nvidia",
-        )
-        return _extract_completion_content(response)
-
     try:
         response = create_chat_completion(
             messages=[{"role": "user", "content": prompt}],
@@ -826,16 +825,6 @@ def _create_json_completion(prompt, model, max_tokens, temperature):
 
 def _create_text_completion(messages, model, max_tokens, temperature):
     provider = _get_active_completion_provider()
-    if provider == "nvidia":
-        response = create_chat_completion(
-            messages=messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            provider="nvidia",
-        )
-        return _extract_completion_content(response)
-
     try:
         response = create_chat_completion(
             messages=messages,
@@ -848,7 +837,7 @@ def _create_text_completion(messages, model, max_tokens, temperature):
         if getattr(exc, "provider", "") == "scitely":
             disable_scitely(exc)
         logger.warning(
-            "Text completion failed with provider %s, retrying with auto provider selection.",
+            "Text completion failed with provider %s, retrying with fallback g4f model selection.",
             provider,
         )
         response = create_chat_completion(
@@ -1162,7 +1151,7 @@ def generate_batch_video_queries(texts: list[str], overall_topic="technology", m
               Returns an empty dictionary on failure after retries.
     """
     if not _has_chat_ai_provider():
-        raise ValueError("No supported AI provider is configured. Install g4f or configure Scitely/NVIDIA.")
+        raise ValueError("No supported AI provider is configured. Install g4f.")
 
     model = _get_completion_model(model)
 
@@ -1216,7 +1205,7 @@ def generate_batch_video_queries(texts: list[str], overall_topic="technology", m
                     logger.warning(f"Generated JSON keys do not match expected indices. Response: {response_content}")
 
             except json.JSONDecodeError as json_e:
-                logger.error(f"Failed to parse JSON response from Scitely: {json_e}. Response: {response_content}")
+                logger.error(f"Failed to parse JSON response from AI provider: {json_e}. Response: {response_content}")
             except Exception as parse_e: # Catch other potential errors during dict conversion
                  logger.error(f"Error processing JSON response: {parse_e}. Response: {response_content}")
 
@@ -1250,7 +1239,7 @@ def generate_batch_image_prompts(texts: list[str], overall_topic="technology", m
               Returns an empty dictionary on failure after retries.
     """
     if not _has_chat_ai_provider():
-        raise ValueError("No supported AI provider is configured. Install g4f or configure Scitely/NVIDIA.")
+        raise ValueError("No supported AI provider is configured. Install g4f.")
 
     model = _get_completion_model(model)
 
@@ -1311,7 +1300,7 @@ def generate_batch_image_prompts(texts: list[str], overall_topic="technology", m
                     logger.warning(f"Generated JSON keys do not match expected indices. Response: {response_content}")
 
             except json.JSONDecodeError as json_e:
-                logger.error(f"Failed to parse JSON response from Scitely: {json_e}. Response: {response_content}")
+                logger.error(f"Failed to parse JSON response from AI provider: {json_e}. Response: {response_content}")
             except Exception as parse_e:  # Catch other potential errors during dict conversion
                  logger.error(f"Error processing JSON response: {parse_e}. Response: {response_content}")
 
@@ -2360,7 +2349,7 @@ def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3
             - thumbnail_unsplash_query: Simple query for Unsplash image search
     """
     if not _has_chat_ai_provider():
-        raise ValueError("No supported AI provider is configured. Install g4f or configure Scitely/NVIDIA.")
+        raise ValueError("No supported AI provider is configured. Install g4f.")
 
     model = _get_completion_model(model)
     logger.info("Using AI provider %s for comprehensive content generation", _get_active_completion_provider())
@@ -2581,7 +2570,7 @@ def generate_comprehensive_content(topic, model=None, max_tokens=None, retries=3
                 return content_package
 
             except json.JSONDecodeError as json_e:
-                logger.error(f"Failed to parse JSON response from Scitely: {json_e}")
+                logger.error(f"Failed to parse JSON response from AI provider: {json_e}")
                 logger.error(f"Raw response: {response_content}")
                 if attempt == retries - 1:
                     break
