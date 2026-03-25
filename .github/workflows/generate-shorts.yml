@@ -190,12 +190,19 @@ jobs:
             --topic-direction "${{ inputs.topic_direction }}" \
             --story-text "${{ inputs.story_text }}" \
             --artifacts-dir "workflow_artifacts" \
-            --upload-to-youtube "${{ inputs.upload_to_youtube }}" \
+            --upload-to-youtube "false" \
             --youtube-privacy public
 
-      - name: Upload generated artifacts
+      - name: Upload final bundles and generated artifacts
         uses: actions/upload-artifact@v4
         with:
           name: generated-shorts-${{ github.run_id }}
-          path: workflow_artifacts
+          path: |
+            workflow_artifacts
+            workflow_bundles
           if-no-files-found: error
+
+      - name: Upload generated artifacts to YouTube
+        if: ${{ inputs.upload_to_youtube }}
+        run: |
+          python -m automation.upload_artifacts_to_youtube --artifacts-dir workflow_artifacts --privacy public
